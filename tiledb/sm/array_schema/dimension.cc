@@ -1708,6 +1708,8 @@ Status Dimension::check_tile_extent_upper_floor(
                  domain, tile_extent);
 }
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wimplicit-const-int-float-conversion"
 template <typename T_EXTENT, typename T_FLOOR>
 Status Dimension::check_tile_extent_upper_floor_internal(
     const T_EXTENT* const domain, const T_EXTENT tile_extent) const {
@@ -1729,6 +1731,7 @@ Status Dimension::check_tile_extent_upper_floor_internal(
 
   return Status::Ok();
 }
+#pragma clang diagnostic pop
 
 std::string Dimension::domain_str() const {
   std::stringstream ss;
