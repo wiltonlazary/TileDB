@@ -40,10 +40,7 @@ using namespace tiledb;
 std::string array_name("sparse_global_order_reader_array");
 
 void create_array() {
-  // Create a TileDB config and context with parameters.
-  Config config;
-  config["sm.use_refactored_readers"] = true;
-  Context ctx(config);
+  Context ctx;
 
   // Create domain
   Domain domain(ctx);
@@ -96,7 +93,9 @@ void write_array() {
 }
 
 void read_array() {
-  Context ctx;
+  Config config;
+  config["sm.use_refactored_readers"] = "true";
+  Context ctx(config);
 
   // Prepare the array for reading
   Array array(ctx, array_name, TILEDB_READ);
@@ -111,8 +110,8 @@ void read_array() {
 
   // Prepare buffers that will hold the results
   std::vector<int> data(100);
-  std::vector<int> coords_rows(10);
-  std::vector<int> coords_cols(10);
+  std::vector<int> coords_rows(100);
+  std::vector<int> coords_cols(100);
 
   // Prepare the query
   Query query(ctx, array, TILEDB_READ);
