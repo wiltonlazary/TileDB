@@ -238,9 +238,9 @@ void array_ordered() {
   std::vector<uint64_t> a_write_buffer_1;
   std::vector<uint64_t> rows_write_buffer_1;
   std::vector<uint64_t> cols_write_buffer_1;
-  for (int i = 1; i < 1001; i++) {
-    uint64_t row = i / domain_max + domain_min;
-    uint64_t col = i % domain_max + domain_min;
+  for (int i = 0; i < 3025; i++) {
+    uint64_t row = i / (domain_max - domain_min + 1) + domain_min;
+    uint64_t col = i % (domain_max - domain_min + 1) + domain_min;
     uint64_t coords[2] = {row, col};
     auto tile_pos = get_tile_position(coords, dims);
     auto cell_pos = get_cell_position_in_tile(coords, dims);
@@ -297,9 +297,9 @@ void array_ordered() {
   write_query_buffers_3.emplace_back("cols", &cols_write_buffer_3);*/
 
   std::vector<test_query_buffer_t<uint64_t>> read_query_buffers;
-  std::vector<uint64_t> data(1000);
-  std::vector<uint64_t> coords_rows(1000);
-  std::vector<uint64_t> coords_cols(1000);
+  std::vector<uint64_t> data(3025);
+  std::vector<uint64_t> coords_rows(3025);
+  std::vector<uint64_t> coords_cols(3025);
   read_query_buffers.emplace_back("a", &data);
   read_query_buffers.emplace_back("rows", &coords_rows);
   read_query_buffers.emplace_back("cols", &coords_cols);
@@ -312,7 +312,7 @@ void array_ordered() {
     // write(array_ordered, write_query_buffers_3);
   }
   read_array(array_ordered, read_query_buffers);
-  for (uint64_t i = 0; i < 1000; i++) {
+  for (uint64_t i = 0; i < 3025; i++) {
     std::cerr << "data[" << i << "]:" << data[i] << std::endl;
     // if (data[i] != i+1)
     //  std::cerr<<"Data "<<i<<" does not match anticipated value"<<std::endl;
