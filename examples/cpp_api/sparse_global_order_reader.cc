@@ -28,7 +28,7 @@
  * @section DESCRIPTION
  *
  * When run, this program will create a simple 2D sparse array, write some data
- * to it, and read a slice of the data back in the gloabl layout.
+ * to it, and read a slice of the data back in the global layout.
  */
 
 #include <iostream>
@@ -109,9 +109,9 @@ void read_array() {
             << non_empty_domain[1].second.second << "]\n";
 
   // Prepare buffers that will hold the results
-  std::vector<int> data(100);
-  std::vector<int> coords_rows(100);
-  std::vector<int> coords_cols(100);
+  std::vector<int> data(1000);
+  std::vector<int> coords_rows(1000);
+  std::vector<int> coords_cols(1000);
 
   // Prepare the query
   Query query(ctx, array, TILEDB_READ);

@@ -1,5 +1,5 @@
 /**
- * @file   sparse_global_order_reader.cc
+ * @file   reading_sparse_global.cc
  *
  * @section LICENSE
  *
@@ -28,9 +28,10 @@
  * @section DESCRIPTION
  *
  * When run, this program will create a simple 2D sparse array, write some data
- * to it, and read a slice of the data back in the gloabl layout.
+ * to it, and read a slice of the data back in the global layout.
  */
 
+#include <cmath>
 #include <iostream>
 #include <tiledb/tiledb>
 
@@ -170,45 +171,41 @@ void read_array(
 }
 
 template <typename DIM_T>
-uint64_t get_tile_position(
-    uint64_t* coords, const std::vector<test_dim_t<DIM_T>>& test_dims) {
-  const uint64_t domain_min = test_dims[0].domain_[0];
-  const uint64_t domain_max = test_dims[0].domain_[1];
+void add_tile_coords(
+    uint64_t i,
+    const std::vector<test_dim_t<DIM_T>>& test_dims,
+    uint64_t* coords) {
+  const auto domain_extent =
+      (test_dims[0].domain_[1] - test_dims[0].domain_[0] + 1);
   const int tile_extent = test_dims[0].tile_extent_;
   const int dim_num = test_dims.size();
-  const int tiles_per_row_column = domain_max / tile_extent;
-  uint64_t tile_coords[dim_num];
-  for (int dim = 0; dim < dim_num; dim++) {
-    tile_coords[dim] = (coords[dim] - domain_min) / tile_extent;
+  const int tiles_per_row_column = domain_extent / tile_extent;
+
+  auto tile_pos = i / (tile_extent * tile_extent);
+
+  auto div = (uint64_t)pow(tiles_per_row_column, dim_num - 1);
+  for (int64_t dim = 0; dim < dim_num; dim++) {
+    coords[dim] += ((tile_pos / div) % tiles_per_row_column) * tile_extent;
+    div /= tiles_per_row_column;
   }
-  // Now tile_coords is from 0 to 1 on each axis, get the tile position.
-  uint64_t pos = 0;
-  uint64_t multiplier = 1;
-  for (int64_t dim = dim_num - 1; dim >= 0; dim--) {
-    pos += multiplier * tile_coords[dim];
-    multiplier *= tiles_per_row_column;
-  }
-  return pos;
 }
 
 template <typename DIM_T>
-uint64_t get_cell_position_in_tile(
-    uint64_t* coords, const std::vector<test_dim_t<DIM_T>>& test_dims) {
+void add_cell_coords(
+    uint64_t i,
+    const std::vector<test_dim_t<DIM_T>>& test_dims,
+    uint64_t* coords) {
   const uint64_t domain_min = test_dims[0].domain_[0];
   const int tile_extent = test_dims[0].tile_extent_;
   const int dim_num = test_dims.size();
-  uint64_t coords_in_tile[dim_num];
-  for (int dim = 0; dim < dim_num; dim++) {
-    coords_in_tile[dim] = (coords[dim] - domain_min) % tile_extent;
+
+  auto cell_pos = i % (tile_extent * tile_extent);
+
+  auto div = (uint64_t)pow(tile_extent, dim_num - 1);
+  for (int64_t dim = 0; dim < dim_num; dim++) {
+    coords[dim] += (cell_pos / div) % tile_extent + domain_min;
+    div /= tile_extent;
   }
-  // Now coords_in_tile is from 0 to 4 on each axis, get the cell position.
-  uint64_t pos = 0;
-  uint64_t multiplier = 1;
-  for (int64_t dim = dim_num - 1; dim >= 0; dim--) {
-    pos += multiplier * coords_in_tile[dim];
-    multiplier *= tile_extent;
-  }
-  return pos;
 }
 
 void array_ordered() {
@@ -238,17 +235,14 @@ void array_ordered() {
   std::vector<uint64_t> a_write_buffer_1;
   std::vector<uint64_t> rows_write_buffer_1;
   std::vector<uint64_t> cols_write_buffer_1;
-  for (int i = 0; i < 3025; i++) {
-    uint64_t row = i / (domain_max - domain_min + 1) + domain_min;
-    uint64_t col = i % (domain_max - domain_min + 1) + domain_min;
-    uint64_t coords[2] = {row, col};
-    auto tile_pos = get_tile_position(coords, dims);
-    auto cell_pos = get_cell_position_in_tile(coords, dims);
-    auto a = tile_pos * tile_extent * tile_extent + cell_pos;
-    rows_write_buffer_1.emplace_back(row);
-    cols_write_buffer_1.emplace_back(col);
-    a_write_buffer_1.emplace_back(a);
-    // std::cout << row << " " << col << " " << a << std::endl;
+  for (int i = 0; i < 1000; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_1.emplace_back(coords[0]);
+    cols_write_buffer_1.emplace_back(coords[1]);
+    a_write_buffer_1.emplace_back(i);
   }
   write_query_buffers_1.emplace_back("a", &a_write_buffer_1);
   write_query_buffers_1.emplace_back("rows", &rows_write_buffer_1);
@@ -297,9 +291,9 @@ void array_ordered() {
   write_query_buffers_3.emplace_back("cols", &cols_write_buffer_3);*/
 
   std::vector<test_query_buffer_t<uint64_t>> read_query_buffers;
-  std::vector<uint64_t> data(3025);
-  std::vector<uint64_t> coords_rows(3025);
-  std::vector<uint64_t> coords_cols(3025);
+  std::vector<uint64_t> data(1000);
+  std::vector<uint64_t> coords_rows(1000);
+  std::vector<uint64_t> coords_cols(1000);
   read_query_buffers.emplace_back("a", &data);
   read_query_buffers.emplace_back("rows", &coords_rows);
   read_query_buffers.emplace_back("cols", &coords_cols);
@@ -312,7 +306,7 @@ void array_ordered() {
     // write(array_ordered, write_query_buffers_3);
   }
   read_array(array_ordered, read_query_buffers);
-  for (uint64_t i = 0; i < 3025; i++) {
+  for (uint64_t i = 0; i < 1000; i++) {
     std::cerr << "data[" << i << "]:" << data[i] << std::endl;
     // if (data[i] != i+1)
     //  std::cerr<<"Data "<<i<<" does not match anticipated value"<<std::endl;
