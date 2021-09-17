@@ -78,7 +78,7 @@ void create_array(
     const std::string& array_name,
     const std::vector<test_dim_t<DIM_T>>& test_dims,
     const std::vector<test_attr_t<ATTR_T>>& test_attrs) {
-  // Create domain
+  // Create domain.
   Context ctx;
   Domain domain(ctx);
 
@@ -111,26 +111,26 @@ template <typename ATTR_T>
 void write(
     const std::string& array_name,
     const std::vector<test_query_buffer_t<ATTR_T>>& test_query_buffers) {
-  // Open the array for writing
+  // Open the array for writing.
   Config config;
   config["sm.use_refactored_readers"] = true;
   Context ctx(config);
   Array array(ctx, array_name, TILEDB_WRITE);
 
-  // Create the queries with unordered layouts
+  // Create the queries with unordered layouts.
   Query query(ctx, array);
   query.set_layout(TILEDB_UNORDERED);
 
-  // Set the query buffers
+  // Set the query buffers.
   for (const auto& test_query_buffer : test_query_buffers) {
     query.set_data_buffer(test_query_buffer.name_, *test_query_buffer.data_);
   }
 
-  // Submit and finalize the queries
+  // Submit and finalize the queries.
   query.submit();
   query.finalize();
 
-  // Close the array
+  // Close the array.
   array.close();
 }
 
@@ -142,10 +142,10 @@ void read_array(
   config["sm.use_refactored_readers"] = "true";
   Context ctx(config);
 
-  // Open the array for reading
+  // Open the array for reading.
   Array array(ctx, array_name, TILEDB_READ);
 
-  // Print non-empty domain
+  // Print non-empty domain.
   auto non_empty_domain = array.non_empty_domain<uint64_t>();
   std::cout << "Non-empty domain: ";
   std::cout << "[" << non_empty_domain[0].second.first << ","
@@ -153,7 +153,7 @@ void read_array(
             << non_empty_domain[1].second.first << ","
             << non_empty_domain[1].second.second << "]\n";
 
-  // Create the read query
+  // Create the read query.
   Query query(ctx, array, TILEDB_READ);
   query.set_layout(TILEDB_GLOBAL_ORDER);
 
@@ -249,21 +249,18 @@ void array_ordered() {
   write_query_buffers_1.emplace_back("cols", &cols_write_buffer_1);
 
   // Fragment 2
-  /*std::vector<test_query_buffer_t<uint64_t>> write_query_buffers_2;
+  std::vector<test_query_buffer_t<uint64_t>> write_query_buffers_2;
   std::vector<uint64_t> a_write_buffer_2;
   std::vector<uint64_t> rows_write_buffer_2;
   std::vector<uint64_t> cols_write_buffer_2;
-  for (int i = 1001; i < 2001; i++) {
-    uint64_t row = i / domain_max + domain_min;
-    uint64_t col = i % domain_max + domain_min;
-    uint64_t coords[2] = {row, col};
-    auto tile_pos = get_tile_position(coords, dims);
-    auto cell_pos = get_cell_position_in_tile(coords, dims);
-    auto a = tile_pos * tile_extent * tile_extent + cell_pos;
-    rows_write_buffer_2.emplace_back(row);
-    cols_write_buffer_2.emplace_back(col);
-    a_write_buffer_2.emplace_back(a);
-    std::cout << row << " " << col << " " << a << std::endl;
+  for (int i = 1000; i < 2000; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_2.emplace_back(coords[0]);
+    cols_write_buffer_2.emplace_back(coords[1]);
+    a_write_buffer_2.emplace_back(i);
   }
   write_query_buffers_2.emplace_back("a", &a_write_buffer_2);
   write_query_buffers_2.emplace_back("rows", &rows_write_buffer_2);
@@ -274,49 +271,308 @@ void array_ordered() {
   std::vector<uint64_t> a_write_buffer_3;
   std::vector<uint64_t> rows_write_buffer_3;
   std::vector<uint64_t> cols_write_buffer_3;
-  for (int i = 2001; i < 3001; i++) {
-    uint64_t row = i / domain_max + domain_min;
-    uint64_t col = i % domain_max + domain_min;
-    uint64_t coords[2] = {row, col};
-    auto tile_pos = get_tile_position(coords, dims);
-    auto cell_pos = get_cell_position_in_tile(coords, dims);
-    auto a = tile_pos * tile_extent * tile_extent + cell_pos;
-    rows_write_buffer_2.emplace_back(row);
-    cols_write_buffer_2.emplace_back(col);
-    a_write_buffer_2.emplace_back(a);
-    std::cout << row << " " << col << " " << a << std::endl;
+  for (int i = 2000; i < 3000; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_3.emplace_back(coords[0]);
+    cols_write_buffer_3.emplace_back(coords[1]);
+    a_write_buffer_3.emplace_back(i);
   }
   write_query_buffers_3.emplace_back("a", &a_write_buffer_3);
   write_query_buffers_3.emplace_back("rows", &rows_write_buffer_3);
-  write_query_buffers_3.emplace_back("cols", &cols_write_buffer_3);*/
+  write_query_buffers_3.emplace_back("cols", &cols_write_buffer_3);
 
   std::vector<test_query_buffer_t<uint64_t>> read_query_buffers;
-  std::vector<uint64_t> data(1000);
-  std::vector<uint64_t> coords_rows(1000);
-  std::vector<uint64_t> coords_cols(1000);
+  std::vector<uint64_t> data(3000);
+  std::vector<uint64_t> coords_rows(3000);
+  std::vector<uint64_t> coords_cols(3000);
   read_query_buffers.emplace_back("a", &data);
   read_query_buffers.emplace_back("rows", &coords_rows);
   read_query_buffers.emplace_back("cols", &coords_cols);
 
-  // Create and write the arrays only if they do not exist
+  // Create and write the arrays only if they do not exist.
   if (Object::object(ctx, array_ordered).type() != Object::Type::Array) {
     create_array(array_ordered, dims, attrs);
     write(array_ordered, write_query_buffers_1);
-    // write(array_ordered, write_query_buffers_2);
-    // write(array_ordered, write_query_buffers_3);
+    write(array_ordered, write_query_buffers_2);
+    write(array_ordered, write_query_buffers_3);
   }
   read_array(array_ordered, read_query_buffers);
-  for (uint64_t i = 0; i < 1000; i++) {
-    std::cerr << "data[" << i << "]:" << data[i] << std::endl;
-    // if (data[i] != i+1)
-    //  std::cerr<<"Data "<<i<<" does not match anticipated value"<<std::endl;
+
+  // Check that the read data is correct.
+  for (uint64_t i = 0; i < 3000; i++) {
+    if (data[i] != i)
+      std::cerr << "Error: Data at coordinate {" << coords_rows[i] << ","
+                << coords_cols[i]
+                << "} is inconsistent with the anticipated value." << std::endl;
   }
-  // validate_read(read_query_buffers, full_data_write_buffer);
+}
+
+void array_interleaved() {
+  Context ctx;
+
+  // Name of array.
+  std::string array_ordered("sparse_global_order_reader_interleaved_array");
+
+  // Define the dimensions.
+  std::vector<test_dim_t<uint64_t>> dims;
+  const uint64_t domain_min = 1;
+  const uint64_t domain_max = 25;
+  const uint64_t tile_extent = 5;
+  const std::array<uint64_t, 2> rows_domain = {domain_min, domain_max};
+  dims.emplace_back("rows", rows_domain, tile_extent);
+  const std::array<uint64_t, 2> cols_domain = {domain_min, domain_max};
+  dims.emplace_back("cols", cols_domain, tile_extent);
+
+  // Define the attributes.
+  std::vector<test_attr_t<uint64_t>> attrs;
+  attrs.emplace_back("a");
+
+  // Define the write query buffers for "a" and
+  // dimension query buffers with an unordered write order.
+  // Fragment 1
+  std::vector<test_query_buffer_t<uint64_t>> write_query_buffers_1;
+  std::vector<uint64_t> a_write_buffer_1;
+  std::vector<uint64_t> rows_write_buffer_1;
+  std::vector<uint64_t> cols_write_buffer_1;
+  for (int i = 0; i < 100; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_1.emplace_back(coords[0]);
+    cols_write_buffer_1.emplace_back(coords[1]);
+    a_write_buffer_1.emplace_back(i);
+  }
+  for (int i = 200; i < 300; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_1.emplace_back(coords[0]);
+    cols_write_buffer_1.emplace_back(coords[1]);
+    a_write_buffer_1.emplace_back(i);
+  }
+  write_query_buffers_1.emplace_back("a", &a_write_buffer_1);
+  write_query_buffers_1.emplace_back("rows", &rows_write_buffer_1);
+  write_query_buffers_1.emplace_back("cols", &cols_write_buffer_1);
+
+  // Fragment 2
+  std::vector<test_query_buffer_t<uint64_t>> write_query_buffers_2;
+  std::vector<uint64_t> a_write_buffer_2;
+  std::vector<uint64_t> rows_write_buffer_2;
+  std::vector<uint64_t> cols_write_buffer_2;
+  for (int i = 100; i < 200; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_2.emplace_back(coords[0]);
+    cols_write_buffer_2.emplace_back(coords[1]);
+    a_write_buffer_2.emplace_back(i);
+  }
+  for (int i = 500; i < 600; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_2.emplace_back(coords[0]);
+    cols_write_buffer_2.emplace_back(coords[1]);
+    a_write_buffer_2.emplace_back(i);
+  }
+  write_query_buffers_2.emplace_back("a", &a_write_buffer_2);
+  write_query_buffers_2.emplace_back("rows", &rows_write_buffer_2);
+  write_query_buffers_2.emplace_back("cols", &cols_write_buffer_2);
+
+  // Fragment 3
+  std::vector<test_query_buffer_t<uint64_t>> write_query_buffers_3;
+  std::vector<uint64_t> a_write_buffer_3;
+  std::vector<uint64_t> rows_write_buffer_3;
+  std::vector<uint64_t> cols_write_buffer_3;
+  for (int i = 300; i < 400; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_3.emplace_back(coords[0]);
+    cols_write_buffer_3.emplace_back(coords[1]);
+    a_write_buffer_3.emplace_back(i);
+  }
+  for (int i = 400; i < 500; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_3.emplace_back(coords[0]);
+    cols_write_buffer_3.emplace_back(coords[1]);
+    a_write_buffer_3.emplace_back(i);
+  }
+  write_query_buffers_3.emplace_back("a", &a_write_buffer_3);
+  write_query_buffers_3.emplace_back("rows", &rows_write_buffer_3);
+  write_query_buffers_3.emplace_back("cols", &cols_write_buffer_3);
+
+  std::vector<test_query_buffer_t<uint64_t>> read_query_buffers;
+  std::vector<uint64_t> data(600);
+  std::vector<uint64_t> coords_rows(600);
+  std::vector<uint64_t> coords_cols(600);
+  read_query_buffers.emplace_back("a", &data);
+  read_query_buffers.emplace_back("rows", &coords_rows);
+  read_query_buffers.emplace_back("cols", &coords_cols);
+
+  // Create and write the arrays only if they do not exist.
+  if (Object::object(ctx, array_ordered).type() != Object::Type::Array) {
+    create_array(array_ordered, dims, attrs);
+    write(array_ordered, write_query_buffers_1);
+    write(array_ordered, write_query_buffers_2);
+    write(array_ordered, write_query_buffers_3);
+  }
+  read_array(array_ordered, read_query_buffers);
+
+  // Check that the read data is correct.
+  for (uint64_t i = 0; i < 600; i++) {
+    if (data[i] != i)
+      std::cerr << "Error: Data at coordinate {" << coords_rows[i] << ","
+                << coords_cols[i]
+                << "} is inconsistent with the anticipated value." << std::endl;
+  }
+}
+
+void array_duplicated() {
+  Context ctx;
+
+  // Name of array.
+  std::string array_ordered("sparse_global_order_reader_duplicated_array");
+
+  // Define the dimensions.
+  std::vector<test_dim_t<uint64_t>> dims;
+  const uint64_t domain_min = 1;
+  const uint64_t domain_max = 20;
+  const uint64_t tile_extent = 4;
+  const std::array<uint64_t, 2> rows_domain = {domain_min, domain_max};
+  dims.emplace_back("rows", rows_domain, tile_extent);
+  const std::array<uint64_t, 2> cols_domain = {domain_min, domain_max};
+  dims.emplace_back("cols", cols_domain, tile_extent);
+
+  // Define the attributes.
+  std::vector<test_attr_t<uint64_t>> attrs;
+  attrs.emplace_back("a");
+
+  // Define the write query buffers for "a" and
+  // dimension query buffers with an unordered write order.
+  // Fragment 1
+  std::vector<test_query_buffer_t<uint64_t>> write_query_buffers_1;
+  std::vector<uint64_t> a_write_buffer_1;
+  std::vector<uint64_t> rows_write_buffer_1;
+  std::vector<uint64_t> cols_write_buffer_1;
+  for (int i = 0; i < 100; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_1.emplace_back(coords[0]);
+    cols_write_buffer_1.emplace_back(coords[1]);
+    a_write_buffer_1.emplace_back(i);
+  }
+  for (int i = 200; i < 300; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_1.emplace_back(coords[0]);
+    cols_write_buffer_1.emplace_back(coords[1]);
+    a_write_buffer_1.emplace_back(i);
+  }
+  write_query_buffers_1.emplace_back("a", &a_write_buffer_1);
+  write_query_buffers_1.emplace_back("rows", &rows_write_buffer_1);
+  write_query_buffers_1.emplace_back("cols", &cols_write_buffer_1);
+
+  // Fragment 2
+  std::vector<test_query_buffer_t<uint64_t>> write_query_buffers_2;
+  std::vector<uint64_t> a_write_buffer_2;
+  std::vector<uint64_t> rows_write_buffer_2;
+  std::vector<uint64_t> cols_write_buffer_2;
+  for (int i = 0; i < 100; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_2.emplace_back(coords[0]);
+    cols_write_buffer_2.emplace_back(coords[1]);
+    a_write_buffer_2.emplace_back(i);
+  }
+  for (int i = 100; i < 200; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_2.emplace_back(coords[0]);
+    cols_write_buffer_2.emplace_back(coords[1]);
+    a_write_buffer_2.emplace_back(i);
+  }
+  write_query_buffers_2.emplace_back("a", &a_write_buffer_2);
+  write_query_buffers_2.emplace_back("rows", &rows_write_buffer_2);
+  write_query_buffers_2.emplace_back("cols", &cols_write_buffer_2);
+
+  // Fragment 3
+  std::vector<test_query_buffer_t<uint64_t>> write_query_buffers_3;
+  std::vector<uint64_t> a_write_buffer_3;
+  std::vector<uint64_t> rows_write_buffer_3;
+  std::vector<uint64_t> cols_write_buffer_3;
+  for (int i = 100; i < 200; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_3.emplace_back(coords[0]);
+    cols_write_buffer_3.emplace_back(coords[1]);
+    a_write_buffer_3.emplace_back(i);
+  }
+  for (int i = 200; i < 300; i++) {
+    uint64_t coords[2] = {0, 0};
+    add_tile_coords(i, dims, coords);
+    add_cell_coords(i, dims, coords);
+
+    rows_write_buffer_3.emplace_back(coords[0]);
+    cols_write_buffer_3.emplace_back(coords[1]);
+    a_write_buffer_3.emplace_back(i);
+  }
+  write_query_buffers_3.emplace_back("a", &a_write_buffer_3);
+  write_query_buffers_3.emplace_back("rows", &rows_write_buffer_3);
+  write_query_buffers_3.emplace_back("cols", &cols_write_buffer_3);
+
+  std::vector<test_query_buffer_t<uint64_t>> read_query_buffers;
+  std::vector<uint64_t> data(600);
+  std::vector<uint64_t> coords_rows(600);
+  std::vector<uint64_t> coords_cols(600);
+  read_query_buffers.emplace_back("a", &data);
+  read_query_buffers.emplace_back("rows", &coords_rows);
+  read_query_buffers.emplace_back("cols", &coords_cols);
+
+  // Create and write the arrays only if they do not exist.
+  if (Object::object(ctx, array_ordered).type() != Object::Type::Array) {
+    create_array(array_ordered, dims, attrs);
+    write(array_ordered, write_query_buffers_1);
+    write(array_ordered, write_query_buffers_2);
+    write(array_ordered, write_query_buffers_3);
+  }
+  read_array(array_ordered, read_query_buffers);
+
+  // Check that the read data is correct.
+  uint64_t count = 0;
+  for (uint64_t i = 0; i < 600; i += 2) {
+    if (data[i] != count && data[i + 1] != count)
+      std::cerr << "Error: Data at coordinate {" << coords_rows[i] << ","
+                << coords_cols[i]
+                << "} is inconsistent with the anticipated value." << std::endl;
+    count++;
+  }
 }
 
 int main() {
   array_ordered();
-  // array_interleaved();
-  // array_duplicated();
+  array_interleaved();
+  array_duplicated();
   return 0;
 }
