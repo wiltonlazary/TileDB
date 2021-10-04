@@ -165,6 +165,9 @@ Query::Status read_array(
   // Submit the query.
   auto status = query.submit();
 
+  std::string stats = query.stats();
+  std::cerr << stats << std::endl;
+
   // Validate
   /*auto result_elements = query.result_buffer_elements();
   auto num_a_elements = result_elements["a"].second;
@@ -306,7 +309,7 @@ void test(uint64_t full_domain, uint64_t num_fragments, std::string layout) {
   Context ctx;
 
   // Define the dimensions.
-  uint64_t domain_max = ceil(sqrt(2 * full_domain));
+  uint64_t domain_max = ceil(sqrt(4 * full_domain));
   uint64_t tile_extent = ceil(0.2 * domain_max);
   std::vector<test_dim_t<uint64_t>> dims;
   define_dimensions(1, domain_max, tile_extent, dims);
@@ -461,8 +464,7 @@ int main() {
   // Note: full_domain must be divisible by num_fragments
   // Note: if using interleaved or duplicated order, full_domain must also be
   // divisible by num_fragments * 2
-  test(100000000, 10000, "ordered");  // this works, 95000, 950 does not.
-  // test(1000000000, 10000000, "ordered");  //1GB, 100MB fragments
+  test(2000000000, 1000, "ordered");
   // Object::remove(ctx, array_name);
 
   return 0;
