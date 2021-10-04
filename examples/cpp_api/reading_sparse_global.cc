@@ -165,8 +165,8 @@ Query::Status read_array(
   // Submit the query.
   auto status = query.submit();
 
-  std::string stats = query.stats();
-  std::cerr << stats << std::endl;
+  // std::string stats = query.stats();
+  // std::cerr << stats << std::endl;
 
   // Validate
   /*auto result_elements = query.result_buffer_elements();
@@ -256,11 +256,11 @@ void define_dimensions(
 }
 
 void print(
-    uint64_t full_domain,
+    // uint64_t full_domain,
     std::vector<uint64_t> data,
     std::vector<uint64_t> coords_rows,
     std::vector<uint64_t> coords_cols) {
-  for (uint64_t i = 0; i < full_domain; i++)
+  for (uint64_t i = 0; i < 7; i++)
     std::cerr << "{" << coords_rows[i] << "," << coords_cols[i] << "}"
               << " = " << data[i] << std::endl;
 }
@@ -353,31 +353,47 @@ void test(uint64_t full_domain, uint64_t num_fragments, std::string layout) {
   } else if (layout == "interleaved") {
     // We need 2 different query buffers
     // One for the lower half and one for the upper half of the domain
-    uint64_t iterator_size = iterator_lower;
-    uint64_t last_upper = full_domain / 2;
-    uint64_t iterator_upper = last_upper + iterator_size;
-    while (iterator_upper <= full_domain) {
+    std::vector<std::pair<uint64_t, uint64_t>> domains;
+    uint64_t iterator = 0;
+    uint64_t fragment_multiplier = 2;
+    uint64_t iterator_size =
+        full_domain / (fragment_multiplier * num_fragments);
+
+    while (iterator <= full_domain) {
+      domains.emplace_back(iterator, iterator + iterator_size);
+      iterator += iterator_size;
+    }
+
+    while (!domains.empty()) {
+      uint64_t rand_iterator_1 = rand() % domains.size();
+      std::pair<uint64_t, uint64_t> domain_1 = domains[rand_iterator_1];
+      domains.erase(domains.begin() + rand_iterator_1);
+      uint64_t rand_iterator_2 = rand() % domains.size();
+      std::pair<uint64_t, uint64_t> domain_2 = domains[rand_iterator_2];
+      domains.erase(domains.begin() + rand_iterator_2);
+
+      if (domain_1 > domain_2) {
+        std::swap(domain_1, domain_2);
+      }
+
       create_write_query_buffer(
-          last,
-          iterator_lower,
+          domain_1.first,
+          domain_1.second,
           dims,
           &a_write,
           &row_write,
           &col_write,
           write_query_buffers);
       create_write_query_buffer(
-          last_upper,
-          iterator_upper,
+          domain_2.first,
+          domain_2.second,
           dims,
           &a_write,
           &row_write,
           &col_write,
           write_query_buffers);
+
       status = write(write_query_buffers);
-      last = iterator_lower;
-      last_upper = iterator_upper;
-      iterator_lower += iterator_size;
-      iterator_upper += iterator_size;
       if (status != Query::Status::COMPLETE)  // Error status
         return;
     }
@@ -443,7 +459,7 @@ void test(uint64_t full_domain, uint64_t num_fragments, std::string layout) {
 
   // Validate.
   validate_data(0, full_domain, layout, data, coords_rows, coords_cols);
-
+  // print(data, coords_rows, coords_cols);
   // Clear the query buffers
   for (auto& read_query_buffer : read_query_buffers) {
     read_query_buffer.data_->clear();
@@ -464,7 +480,7 @@ int main() {
   // Note: full_domain must be divisible by num_fragments
   // Note: if using interleaved or duplicated order, full_domain must also be
   // divisible by num_fragments * 2
-  test(2000000000, 1000, "ordered");
+  test(1000, 10, "interleaved");
   // Object::remove(ctx, array_name);
 
   return 0;
