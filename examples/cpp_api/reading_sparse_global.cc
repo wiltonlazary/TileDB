@@ -145,44 +145,6 @@ Query::Status write(
   return s;
 }
 
-template <typename ATTR_T>
-Query::Status read_array(
-    std::vector<test_query_buffer_t<ATTR_T>>& test_query_buffers) {  //,
-  // uint64_t full_domain) {
-  Config config;
-  config["sm.use_refactored_readers"] = "true";
-  Context ctx(config);
-
-  // Open the array for reading and create the read query
-  Array array(ctx, array_name, TILEDB_READ);
-  Query query(ctx, array, TILEDB_READ);
-  query.set_layout(TILEDB_GLOBAL_ORDER);
-
-  // Set the query buffers.
-  for (auto& test_query_buffer : test_query_buffers)
-    query.set_data_buffer(test_query_buffer.name_, *test_query_buffer.data_);
-
-  // Submit the query.
-  auto status = query.submit();
-
-  // std::string stats = query.stats();
-  // std::cerr << stats << std::endl;
-
-  // Validate
-  /*auto result_elements = query.result_buffer_elements();
-  auto num_a_elements = result_elements["a"].second;
-  if (num_a_elements != full_domain) {
-    std::cerr << "Reader Error: The number of fragments read ("
-      << num_a_elements << ") does not match the expected value ("
-      << full_domain << ")." << std::endl;
-  }*/
-
-  // Close the array.
-  array.close();
-
-  return status;
-}
-
 template <typename DIM_T>
 void add_tile_coords(
     uint64_t i,
@@ -269,9 +231,9 @@ void validate_data(
     uint64_t validation_min,
     uint64_t validation_max,
     std::string layout,
-    std::vector<uint64_t> data,
-    std::vector<uint64_t> coords_rows,
-    std::vector<uint64_t> coords_cols) {
+    std::vector<uint64_t>& data,
+    std::vector<uint64_t>& coords_rows,
+    std::vector<uint64_t>& coords_cols) {
   if (layout == "ordered" || layout == "interleaved") {
     for (uint64_t i = validation_min; i < validation_max; i++) {
       if (data[i - validation_min] != i) {
@@ -303,10 +265,13 @@ void validate_data(
   }
 }
 
-// Assume there are always 3 fragments (for now)
-// Thus full_domain should be some multiple of 3 and 6
-void test(uint64_t full_domain, uint64_t num_fragments, std::string layout) {
+bool write_array(
+    uint64_t full_domain, uint64_t num_fragments, std::string layout) {
   Context ctx;
+
+  // Remove the array if it already exists.
+  if (Object::object(ctx, array_name).type() == Object::Type::Array)
+    Object::remove(ctx, array_name);
 
   // Define the dimensions.
   uint64_t domain_max = ceil(sqrt(4 * full_domain));
@@ -347,7 +312,7 @@ void test(uint64_t full_domain, uint64_t num_fragments, std::string layout) {
       last = iterator;
       iterator += iterator_size;
       if (status != Query::Status::COMPLETE)  // Error status
-        return;
+        return false;
     }
 
   } else if (layout == "interleaved") {
@@ -395,7 +360,7 @@ void test(uint64_t full_domain, uint64_t num_fragments, std::string layout) {
 
       status = write(write_query_buffers);
       if (status != Query::Status::COMPLETE)  // Error status
-        return;
+        return false;
     }
 
   } else if (layout == "duplicated") {
@@ -424,7 +389,7 @@ void test(uint64_t full_domain, uint64_t num_fragments, std::string layout) {
       last = iterator_lower;
       iterator_lower += iterator_size;
       if (status != Query::Status::COMPLETE)  // Error status
-        return;
+        return false;
     }
 
   } else {
@@ -437,50 +402,94 @@ void test(uint64_t full_domain, uint64_t num_fragments, std::string layout) {
   std::cerr << "\n[Performance][Write]: " << write_duration.count()
             << " milliseconds." << std::endl;
 
+  return true;
+}
+
+bool read_array(uint64_t full_domain, std::string layout) {
+  Config config;
+  config["sm.use_refactored_readers"] = "true";
+  Context ctx(config);
+
+  // 100MB buffer size.
+  uint64_t buffer_size = 100 * 1024 * 1024;
+
+  std::cerr << "Reading full domain: " << full_domain << std::endl;
+
   // Set up buffers
   std::vector<test_query_buffer_t<uint64_t>> read_query_buffers;
-  std::vector<uint64_t> data(full_domain), coords_rows(full_domain),
-      coords_cols(full_domain);
+  std::vector<uint64_t> data(buffer_size), coords_rows(buffer_size),
+      coords_cols(buffer_size);
   read_query_buffers.emplace_back("a", &data);
   read_query_buffers.emplace_back("rows", &coords_rows);
   read_query_buffers.emplace_back("cols", &coords_cols);
 
-  // Read array.
-  auto start = high_resolution_clock::now();
-  status = read_array(read_query_buffers);  //, full_domain);
-  // if (status != Query::Status::COMPLETE)  // Error status
-  //  return;
+  // Open the array for reading and create the read query
+  Array array(ctx, array_name, TILEDB_READ);
+  Query query(ctx, array, TILEDB_READ);
+  query.set_layout(TILEDB_GLOBAL_ORDER);
+
+  // Set the query buffers.
+  for (auto& test_query_buffer : read_query_buffers)
+    query.set_data_buffer(test_query_buffer.name_, *test_query_buffer.data_);
+
+  uint64_t total_time = 0;
+  uint64_t current_offset = 0;
+  Query::Status status = Query::Status::UNINITIALIZED;
+  while (status != Query::Status::COMPLETE) {
+    auto start = high_resolution_clock::now();
+    status = query.submit();
+    auto stop = high_resolution_clock::now();
+    auto duration = duration_cast<milliseconds>(stop - start);
+    total_time += duration.count();
+
+    auto result_buffers = query.result_buffer_elements();
+    auto result_num = result_buffers["a"].second;
+
+    bool done = current_offset + result_num == full_domain;
+    if (status !=
+        (done ? Query::Status::COMPLETE : Query::Status::INCOMPLETE)) {
+      std::cerr << "Unexpected status from read query" << std::endl;
+      return false;
+    }
+
+    // Validate.
+    validate_data(
+        current_offset,
+        current_offset + result_num - 1,
+        layout,
+        data,
+        coords_rows,
+        coords_cols);
+
+    std::cerr << "Processed offset: " << current_offset << std::endl;
+    current_offset += result_num;
+  }
 
   // Performance analysis.
-  auto stop = high_resolution_clock::now();
-  auto duration = duration_cast<milliseconds>(stop - start);
-  std::cerr << "\n[Performance][Read]: " << duration.count() << " milliseconds."
+  std::cerr << "\n[Performance][Read]: " << total_time << " milliseconds."
             << std::endl;
 
-  // Validate.
-  validate_data(0, full_domain, layout, data, coords_rows, coords_cols);
-  // print(data, coords_rows, coords_cols);
   // Clear the query buffers
   for (auto& read_query_buffer : read_query_buffers) {
     read_query_buffer.data_->clear();
   }
   read_query_buffers.clear();
 
-  return;
+  return true;
 }
 
 int main() {
-  Context ctx;
-
-  // Remove the array if it already exists.
-  if (Object::object(ctx, array_name).type() == Object::Type::Array)
-    Object::remove(ctx, array_name);
+  auto seed = std::time(0);
+  srand(seed);
+  std::cerr << "Seed: " << seed << std::endl;
 
   // Note: num_fragments should be about 1% of full_domain
   // Note: full_domain must be divisible by num_fragments
   // Note: if using interleaved or duplicated order, full_domain must also be
   // divisible by num_fragments * 2
-  test(1000, 10, "interleaved");
+  if (write_array(100000000, 1000, "ordered")) {
+    read_array(100000000, "ordered");
+  }
   // Object::remove(ctx, array_name);
 
   return 0;
