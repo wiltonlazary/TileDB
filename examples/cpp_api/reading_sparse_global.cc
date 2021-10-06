@@ -316,47 +316,39 @@ bool write_array(
     }
 
   } else if (layout == "interleaved") {
-    // We need 2 different query buffers
-    // One for the lower half and one for the upper half of the domain
     std::vector<std::pair<uint64_t, uint64_t>> domains;
+    std::vector<std::pair<uint64_t, uint64_t>> fragments;
     uint64_t iterator = 0;
-    uint64_t fragment_multiplier = 2;
+    uint64_t fragment_multiplier = 3;
     uint64_t iterator_size =
         full_domain / (fragment_multiplier * num_fragments);
 
-    while (iterator <= full_domain) {
+    while (iterator < full_domain) {
       domains.emplace_back(iterator, iterator + iterator_size);
       iterator += iterator_size;
     }
 
     while (!domains.empty()) {
-      uint64_t rand_iterator_1 = rand() % domains.size();
-      std::pair<uint64_t, uint64_t> domain_1 = domains[rand_iterator_1];
-      domains.erase(domains.begin() + rand_iterator_1);
-      uint64_t rand_iterator_2 = rand() % domains.size();
-      std::pair<uint64_t, uint64_t> domain_2 = domains[rand_iterator_2];
-      domains.erase(domains.begin() + rand_iterator_2);
-
-      if (domain_1 > domain_2) {
-        std::swap(domain_1, domain_2);
+      for (uint64_t i = 0; i < fragment_multiplier; i++) {
+        uint64_t rand_iterator = rand() % domains.size();
+        std::pair<uint64_t, uint64_t> domain = domains[rand_iterator];
+        domains.erase(domains.begin() + rand_iterator);
+        fragments.emplace_back(domain);
       }
 
-      create_write_query_buffer(
-          domain_1.first,
-          domain_1.second,
-          dims,
-          &a_write,
-          &row_write,
-          &col_write,
-          write_query_buffers);
-      create_write_query_buffer(
-          domain_2.first,
-          domain_2.second,
-          dims,
-          &a_write,
-          &row_write,
-          &col_write,
-          write_query_buffers);
+      std::sort(fragments.begin(), fragments.end());
+
+      while (!fragments.empty()) {
+        create_write_query_buffer(
+            fragments.begin()->first,
+            fragments.begin()->second,
+            dims,
+            &a_write,
+            &row_write,
+            &col_write,
+            write_query_buffers);
+        fragments.erase(fragments.begin());
+      }
 
       status = write(write_query_buffers);
       if (status != Query::Status::COMPLETE)  // Error status
@@ -487,8 +479,11 @@ int main() {
   // Note: full_domain must be divisible by num_fragments
   // Note: if using interleaved or duplicated order, full_domain must also be
   // divisible by num_fragments * 2
-  if (write_array(100000000, 1000, "ordered")) {
+  /*if (write_array(100000000, 1000, "ordered")) {
     read_array(100000000, "ordered");
+  }*/
+  if (write_array(1008, 12, "interleaved")) {
+    read_array(1008, "interleaved");
   }
   // Object::remove(ctx, array_name);
 
