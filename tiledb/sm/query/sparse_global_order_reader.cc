@@ -417,8 +417,13 @@ Status SparseGlobalOrderReader::create_result_tiles(bool* tiles_found) {
                 break;
             }
 
-            if (budget_exceeded)
+            if (budget_exceeded) {
+              if (result_tiles_[f].empty())
+                return LOG_STATUS(Status::SparseGlobalOrderReaderError(
+                    "Cannot load a single tile for fragment, increase memory "
+                    "budget"));
               break;
+            }
             range_it++;
           }
 
@@ -450,8 +455,13 @@ Status SparseGlobalOrderReader::create_result_tiles(bool* tiles_found) {
                 &budget_exceeded));
             *tiles_found = true;
 
-            if (budget_exceeded)
+            if (budget_exceeded) {
+              if (result_tiles_[f].empty())
+                return LOG_STATUS(Status::SparseGlobalOrderReaderError(
+                    "Cannot load a single tile for fragment, increase memory "
+                    "budget"));
               break;
+            }
           }
 
           all_tiles_loaded_[f] = !budget_exceeded;
@@ -630,6 +640,9 @@ Status SparseGlobalOrderReader::add_next_tile_to_queue(
 
       // If there are no more tiles in this fragment, set the bool.
       all_tiles_loaded_[frag_idx] = !*need_more_tiles;
+    } else {
+      read_state_.frag_tile_idx_[frag_idx] = std::pair<uint64_t, uint64_t>(
+          fragment_metadata_[frag_idx]->tile_num(), 0);
     }
   }
 

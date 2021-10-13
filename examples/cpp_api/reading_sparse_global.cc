@@ -328,6 +328,7 @@ bool write_array(
       iterator += iterator_size;
     }
 
+    int count = 1;
     while (!domains.empty()) {
       for (uint64_t i = 0; i < fragment_multiplier; i++) {
         uint64_t rand_iterator = rand() % domains.size();
@@ -353,6 +354,7 @@ bool write_array(
       status = write(write_query_buffers);
       if (status != Query::Status::COMPLETE)  // Error status
         return false;
+      count++;
     }
 
   } else if (layout == "duplicated") {
@@ -397,7 +399,7 @@ bool write_array(
   return true;
 }
 
-bool read_array(uint64_t full_domain, std::string layout) {
+bool read_array(uint64_t full_domain, bool set_subarray, std::string layout) {
   Config config;
   config["sm.use_refactored_readers"] = "true";
   Context ctx(config);
@@ -418,7 +420,10 @@ bool read_array(uint64_t full_domain, std::string layout) {
   // Open the array for reading and create the read query
   Array array(ctx, array_name, TILEDB_READ);
   Query query(ctx, array, TILEDB_READ);
-  query.set_layout(TILEDB_GLOBAL_ORDER);
+  query.set_layout(TILEDB_UNORDERED);
+
+  if (set_subarray)
+    query.set_subarray<uint64_t>({1, full_domain, 1, full_domain});
 
   // Set the query buffers.
   for (auto& test_query_buffer : read_query_buffers)
@@ -479,11 +484,12 @@ int main() {
   // Note: full_domain must be divisible by num_fragments
   // Note: if using interleaved or duplicated order, full_domain must also be
   // divisible by num_fragments * 2
-  /*if (write_array(100000000, 1000, "ordered")) {
+  /*if (write_array(100000000, 100, "ordered")) {
     read_array(100000000, "ordered");
   }*/
-  if (write_array(1008, 12, "interleaved")) {
-    read_array(1008, "interleaved");
+
+  if (write_array(999999, 99, "interleaved")) {
+    read_array(999999, true, "interleaved");
   }
   // Object::remove(ctx, array_name);
 
