@@ -59,13 +59,20 @@ struct test_dim_t {
   uint64_t tile_extent_;
 };
 
-template <typename T>
+template <typename S, typename T>
 struct test_attr_t {
-  test_attr_t(const std::string& name)
-      : name_(name) {
+  test_attr_t(
+      const std::string& name,
+      const tiledb_datatype_t type,
+      const uint32_t cell_val_num)
+      : name_(name)
+      , type_(type)
+      , cell_val_num_(cell_val_num) {
   }
 
   std::string name_;
+  tiledb_datatype_t type_;
+  uint32_t cell_val_num_;
 };
 
 template <typename T>
@@ -82,7 +89,7 @@ struct test_query_buffer_t {
 template <typename DIM_T, typename ATTR_T>
 void create_array(
     const std::vector<test_dim_t<DIM_T>>& test_dims,
-    const std::vector<test_attr_t<ATTR_T>>& test_attrs) {
+    const std::vector<test_attr_t<uint64_t, std::string>>& test_attrs) {
   // Create domain.
   Context ctx;
   Domain domain(ctx);
@@ -265,9 +272,12 @@ void validate_data(
   }
 }
 
-bool write_array(
-    uint64_t full_domain, uint64_t num_fragments, std::string layout) {
-  Context ctx;
+bool write_int_array(
+    uint64_t full_domain,
+    uint64_t num_fragments,
+    std::vector<test_dim_t<uint64_t>> dims,
+    std::string layout) {
+  /*Context ctx;
 
   // Remove the array if it already exists.
   if (Object::object(ctx, array_name).type() == Object::Type::Array)
@@ -285,8 +295,7 @@ bool write_array(
 
   // Create the array only if it does not exist.
   if (Object::object(ctx, array_name).type() != Object::Type::Array)
-    create_array(dims, attrs);
-  std::cerr << "array created" << std::endl;
+    create_array(dims, attrs);*/
 
   // Create buffers for the fragment write queries
   std::vector<test_query_buffer_t<uint64_t>> write_query_buffers;
@@ -420,7 +429,7 @@ bool read_array(uint64_t full_domain, bool set_subarray, std::string layout) {
   // Open the array for reading and create the read query
   Array array(ctx, array_name, TILEDB_READ);
   Query query(ctx, array, TILEDB_READ);
-  query.set_layout(TILEDB_UNORDERED);
+  query.set_layout(TILEDB_GLOBAL_ORDER);
 
   if (set_subarray)
     query.set_subarray<uint64_t>({1, full_domain, 1, full_domain});
@@ -475,22 +484,57 @@ bool read_array(uint64_t full_domain, bool set_subarray, std::string layout) {
   return true;
 }
 
+void sparse_global_test(
+    uint64_t full_domain,
+    uint64_t num_fragments,
+    const std::vector<test_attr_t<uint64_t, std::string>>& attrs,
+    bool set_subarray,
+    std::string layout,
+    int which_attrs) {
+  Context ctx;
+
+  // Remove the array if it already exists.
+  if (Object::object(ctx, array_name).type() == Object::Type::Array)
+    Object::remove(ctx, array_name);
+
+  // Define the dimensions.
+  uint64_t domain_max = ceil(sqrt(4 * full_domain));
+  uint64_t tile_extent = ceil(0.2 * domain_max);
+  std::vector<test_dim_t<uint64_t>> dims;
+  define_dimensions(1, domain_max, tile_extent, dims);
+
+  // Create the array only if it does not exist.
+  if (Object::object(ctx, array_name).type() != Object::Type::Array)
+    create_array(dims, attrs);
+
+  if (which_attrs == 1) {
+    if (write_int_array(full_domain, num_fragments, dims, layout))
+      ;
+    read_array(full_domain, set_subarray, layout);
+  }
+}
+
 int main() {
   auto seed = std::time(0);
   srand(seed);
   std::cerr << "Seed: " << seed << std::endl;
 
+  std::vector<test_attr_t> attrs;
+  attrs.emplace_back("a", TILEDB_INT32, 1);
+
+  sparse_global_test(999999, 99, attrs, true, "ordered", 1);
+
   // Note: num_fragments should be about 1% of full_domain
   // Note: full_domain must be divisible by num_fragments
   // Note: if using interleaved or duplicated order, full_domain must also be
   // divisible by num_fragments * 2
-  /*if (write_array(100000000, 100, "ordered")) {
+  /*if (write_int_array(100000000, 100, "ordered")) {
     read_array(100000000, "ordered");
   }*/
 
-  if (write_array(999999, 99, "interleaved")) {
+  /*if (write_int_array(999999, 99, "interleaved")) {
     read_array(999999, true, "interleaved");
-  }
+  }*/
   // Object::remove(ctx, array_name);
 
   return 0;
