@@ -19,23 +19,23 @@ RUN useradd tiledb \
     && chown tiledb /home/tiledb
 ENV HOME /home/tiledb
 
-# Copy TileDB source files from the build context.
-COPY . /home/tiledb/TileDB
-
 # Install dependencies, accepting prompts with their default value.
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y \
     build-essential \
     wget \
     unzip \
     git \
-    cmake \
     python3 \
     python3-dev \
     python3-pip \
     libssl-dev \
     && apt-get clean \
     && apt-get purge -y \
-    && rm -rf /var/lib/apt/lists*
+    && rm -rf /var/lib/apt/lists* \
+    && pip3 install cmake
+
+# Copy TileDB source files from the build context.
+COPY . /home/tiledb/TileDB
 
 # Build and install TileDB.
 RUN cd /home/tiledb/TileDB \
@@ -49,8 +49,8 @@ RUN cd /home/tiledb/TileDB \
         --enable-serialization \
         --enable-tools \
         --enable=${enable} \
-    && make -j2 \
-    && make -j2 examples \
+    && make -j$(nproc) \
+    && make -j$(nproc) examples \
     && make install-tiledb \
 # Update shared library links/cache.
     && ldconfig \

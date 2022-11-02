@@ -34,7 +34,7 @@
 #include "tiledb/sm/buffer/buffer.h"
 #include "tiledb/sm/crypto/crypto.h"
 
-#include <catch.hpp>
+#include <test/support/tdb_catch.h>
 #include <iostream>
 
 using namespace tiledb::sm;
@@ -500,7 +500,7 @@ TEST_CASE("Crypto: Test MD5", "[crypto][md5]") {
     ConstBuffer input_buffer(
         text_to_checksum.data(), text_to_checksum.length());
     Buffer output_buffer;
-    output_buffer.realloc(Crypto::MD5_DIGEST_BYTES);
+    CHECK(output_buffer.realloc(Crypto::MD5_DIGEST_BYTES).ok());
     CHECK(Crypto::md5(&input_buffer, &output_buffer).ok());
 
     unsigned char* digest =
@@ -524,7 +524,7 @@ TEST_CASE("Crypto: Test SHA256", "[crypto][sha256]") {
     ConstBuffer input_buffer(
         text_to_checksum.data(), text_to_checksum.length());
     Buffer output_buffer;
-    output_buffer.realloc(Crypto::SHA256_DIGEST_BYTES);
+    CHECK(output_buffer.realloc(Crypto::SHA256_DIGEST_BYTES).ok());
     CHECK(Crypto::sha256(&input_buffer, &output_buffer).ok());
 
     unsigned char* digest =

@@ -34,24 +34,29 @@
 #ifndef TILEDB_C_API_STRUCT_DEF_H
 #define TILEDB_C_API_STRUCT_DEF_H
 
+#include "tiledb/api/c_api_support/handle/handle.h"
 #include "tiledb/sm/array/array.h"
 #include "tiledb/sm/array_schema/array_schema.h"
 #include "tiledb/sm/array_schema/array_schema_evolution.h"
 #include "tiledb/sm/buffer/buffer_list.h"
-#include "tiledb/sm/config/config.h"
-#include "tiledb/sm/config/config_iter.h"
 #include "tiledb/sm/filesystem/vfs_file_handle.h"
 #include "tiledb/sm/filter/compression_filter.h"
-#include "tiledb/sm/filter/filter_pipeline.h"
 #include "tiledb/sm/fragment/fragment_info.h"
+#include "tiledb/sm/group/group.h"
 #include "tiledb/sm/query/query.h"
 #include "tiledb/sm/query/query_condition.h"
+#include "tiledb/sm/query/update_value.h"
 #include "tiledb/sm/storage_manager/context.h"
 #include "tiledb/sm/subarray/subarray.h"
 #include "tiledb/sm/subarray/subarray_partitioner.h"
 
 struct tiledb_array_t {
-  tiledb::sm::Array* array_ = nullptr;
+  shared_ptr<tiledb::sm::Array> array_;
+};
+
+struct tiledb_subarray_t {
+  tiledb::sm::Subarray* subarray_ = nullptr;
+  bool is_allocated_ = false;
 };
 
 struct tiledb_buffer_t {
@@ -63,28 +68,12 @@ struct tiledb_buffer_list_t {
   tiledb::sm::BufferList* buffer_list_ = nullptr;
 };
 
-struct tiledb_config_t {
-  tiledb::sm::Config* config_ = nullptr;
-};
-
-struct tiledb_config_iter_t {
-  tiledb::sm::ConfigIter* config_iter_ = nullptr;
-};
-
-struct tiledb_ctx_t {
-  tiledb::sm::Context* ctx_ = nullptr;
-};
-
-struct tiledb_error_t {
-  std::string errmsg_;
-};
-
 struct tiledb_attribute_t {
   tiledb::sm::Attribute* attr_ = nullptr;
 };
 
 struct tiledb_array_schema_t {
-  tiledb::sm::ArraySchema* array_schema_ = nullptr;
+  shared_ptr<tiledb::sm::ArraySchema> array_schema_;
 };
 
 struct tiledb_array_schema_evolution_t {
@@ -97,14 +86,6 @@ struct tiledb_dimension_t {
 
 struct tiledb_domain_t {
   tiledb::sm::Domain* domain_ = nullptr;
-};
-
-struct tiledb_filter_t {
-  tiledb::sm::Filter* filter_ = nullptr;
-};
-
-struct tiledb_filter_list_t {
-  tiledb::sm::FilterPipeline* pipeline_ = nullptr;
 };
 
 struct tiledb_query_t {
@@ -125,6 +106,10 @@ struct tiledb_vfs_fh_t {
 
 struct tiledb_fragment_info_t {
   tiledb::sm::FragmentInfo* fragment_info_ = nullptr;
+};
+
+struct tiledb_group_t {
+  tdb_unique_ptr<tiledb::sm::Group> group_ = nullptr;
 };
 
 #endif

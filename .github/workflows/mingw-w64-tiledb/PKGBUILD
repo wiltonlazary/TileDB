@@ -11,7 +11,8 @@ depends=("${MINGW_PACKAGE_PREFIX}-lz4"
          "${MINGW_PACKAGE_PREFIX}-aws-sdk-cpp"
          "${MINGW_PACKAGE_PREFIX}-bzip2"
          "${MINGW_PACKAGE_PREFIX}-zlib"
-         "${MINGW_PACKAGE_PREFIX}-zstd")
+         "${MINGW_PACKAGE_PREFIX}-zstd"
+         )
 makedepends=("${MINGW_PACKAGE_PREFIX}-cmake"
              "${MINGW_PACKAGE_PREFIX}-gcc"
              "${MINGW_PACKAGE_PREFIX}-curl")
@@ -27,6 +28,7 @@ build() {
   export CXXFLAGS="-mfpmath=sse -msse2"
   fi
 
+
   export MSYS2_ARG_CONV_EXCL="-DCMAKE_INSTALL_PREFIX="
   ${MINGW_PREFIX}/bin/cmake.exe \
     -G"MSYS Makefiles" \
@@ -35,9 +37,19 @@ build() {
     -DCMAKE_BUILD_TYPE=Release \
     -DTILEDB_STATIC=ON \
     -DTILEDB_S3=ON \
+    -DCOMPILER_SUPPORTS_AVX2=OFF \
+    -DTILEDB_SKIP_S3AWSSDK_DIR_LENGTH_CHECK=ON \
+    -DTILEDB_WERROR=OFF \
     ..
   make
   make -C tiledb
+
+# in a local environ, can build to demo/check for previously seen (windows event) handle leakge
+# apparently due to issues with mingw std library implementation.
+# note that with S3 enabled above, and minio not running, the aws sdk may fatally error on exit.
+#  make -C tiledb/test tiledb_unit # need the support lib built
+#  make -C tiledb/test/performance tiledb_explore_msys_handle_leakage
+#  . ../test/performance/msys_handle_leakage/trials.sh
 }
 
 package() {

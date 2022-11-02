@@ -62,6 +62,18 @@ Query
     :project: TileDB-C++
     :members:
 
+QueryCondition
+--------------
+.. doxygenclass:: tiledb::QueryCondition
+    :project: TileDB-C++
+    :members:
+
+Subarray
+--------
+.. doxygenclass:: tiledb::Subarray
+   :project: TileDB-C++
+   :members:
+
 Filter
 ------
 .. doxygenclass:: tiledb::Filter
@@ -113,5 +125,18 @@ Stats
 FragmentInfo
 ------------
 .. doxygenclass:: tiledb::FragmentInfo
+    :project: TileDB-C++
+    :members:
+
+Experimental
+------------
+.. autodoxygenfile:: tiledb_experimental
+    :project: TileDB-C++
+
+.. doxygenclass:: tiledb::ArraySchemaEvolution
+    :project: TileDB-C++
+    :members:
+
+.. doxygenclass:: tiledb::Group
     :project: TileDB-C++
     :members:

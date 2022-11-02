@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -33,17 +33,21 @@
 #ifndef TILEDB_STRATEGY_BASE_H
 #define TILEDB_STRATEGY_BASE_H
 
+#include "tiledb/common/common.h"
+#include "tiledb/common/logger_public.h"
 #include "tiledb/common/status.h"
 #include "tiledb/sm/array_schema/dimension.h"
 #include "tiledb/sm/misc/types.h"
+#include "tiledb/sm/storage_manager/storage_manager_declaration.h"
 
 namespace tiledb {
 namespace sm {
 
 class Array;
 class ArraySchema;
-class StorageManager;
+enum class Layout : uint8_t;
 class Subarray;
+class QueryBuffer;
 
 /** Processes read or write queries. */
 class StrategyBase {
@@ -55,6 +59,7 @@ class StrategyBase {
   /** Constructor. */
   StrategyBase(
       stats::Stats* stats,
+      shared_ptr<Logger> logger,
       StorageManager* storage_manager,
       Array* array,
       Config& config,
@@ -98,11 +103,14 @@ class StrategyBase {
   /** The class stats. */
   stats::Stats* stats_;
 
+  /** The class logger. */
+  shared_ptr<Logger> logger_;
+
   /** The array. */
   const Array* array_;
 
   /** The array schema. */
-  const ArraySchema* array_schema_;
+  const ArraySchema& array_schema_;
 
   /** The config for query-level parameters only. */
   Config& config_;

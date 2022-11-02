@@ -47,6 +47,7 @@ Configuration:
     --enable-sanitizer=SAN          enable sanitizer (clang only)
                                     (address|memory|leak|thread|undefined)
     --enable-debug                  enable debug build
+    --enable-assertions             enable assertions in compiled code
     --enable-release-symbols        enable create symbols for release build
     --enable-coverage               enable build with code coverage support
     --enable-verbose                enable verbose status messages
@@ -58,6 +59,10 @@ Configuration:
     --enable-tools                  enables TileDB CLI tools (experimental)
     --enable-ccache                 enables use of ccache (if present)
     --enable-arrow-tests            enables the compilation of the arrow adapter unit tests
+    --enable-_crc32                  enables building of crc32 library and linkage test
+    --enable-webp                   enables building of webp library and linkage test
+    --enable-abseil                 enables building of abseil library and linkage test
+    --enable-experimental-features  enables experimental TileDB features
     --enable=arg1,arg2...           same as "--enable-arg1 --enable-arg2 ..."
 
 
@@ -93,10 +98,15 @@ tiledb_force_all_deps="OFF"
 tiledb_stats="ON"
 tiledb_static="OFF"
 tiledb_disable_avx2=""
+tiledb_enable_assertions="OFF"
 tiledb_serialization="OFF"
 tiledb_tools="OFF"
 tiledb_ccache="OFF"
 tiledb_arrow_tests="OFF"
+tiledb_experimental_features="OFF"
+tiledb_build_crc32="OFF"
+tiledb_build_webp="OFF"
+tiledb_build_abseil="OFF"
 enable_multiple=""
 while test $# != 0; do
     case "$1" in
@@ -110,9 +120,7 @@ while test $# != 0; do
     --disable-cpp-api) tiledb_cpp_api="OFF";;
     --disable-stats) tiledb_stats="OFF";;
     --disable-avx2) tiledb_disable_avx2="-DCOMPILER_SUPPORTS_AVX2=FALSE";;
-    --enable-static-tiledb) tiledb_static="ON";;
-    --enable-sanitizer=*) san=`arg "$1"`
-                sanitizer="$san";;
+    --enable-assertions) tiledb_assertions="ON";;
     --enable-debug) build_type="Debug";;
     --enable-release-symbols) build_type="RelWithDebInfo";;
     --enable-coverage) build_type="Coverage";;
@@ -122,9 +130,16 @@ while test $# != 0; do
     --enable-azure) tiledb_azure="ON";;
     --enable-gcs) tiledb_gcs="ON";;
     --enable-serialization) tiledb_serialization="ON";;
+    --enable-static-tiledb) tiledb_static="ON";;
+    --enable-sanitizer=*) san=`arg "$1"`
+                sanitizer="$san";;
     --enable-tools) tiledb_tools="ON";;
     --enable-ccache) tiledb_ccache="ON";;
     --enable-arrow-tests) tiledb_arrow_tests="ON";;
+    --enable-_crc32) tiledb_build_crc32="ON";;
+    --enable-webp) tiledb_build_webp="ON";;
+    --enable-abseil) tiledb_build_abseil="ON";;
+    --enable-experimental-features) tiledb_experimental_features="ON";;
     --enable=*) s=`arg "$1"`
                 enable_multiple="$s";;
     --help) usage ;;
@@ -137,6 +152,7 @@ done
 IFS=',' read -ra enables <<< "$enable_multiple"
 for en in "${enables[@]}"; do
   case "$en" in
+    assertions) tiledb_assertions="ON";;
     debug) build_type="Debug";;
     release-symbols) build_type="RelWithDebInfo";;
     coverage) build_type="Coverage";;
@@ -148,8 +164,12 @@ for en in "${enables[@]}"; do
     tools) tiledb_tools="ON";;
     ccache) tiledb_ccache="ON";;
     arrow-tests) tiledb_arrow_tests="ON";;
+    _crc32) tiledb_build_crc32="ON";;
+    webp) tiledb_build_webp="ON";;
+    abseil) tiledb_build_abseil="ON";;
     hdfs) tiledb_hdfs="ON";;
     static-tiledb) tiledb_static="ON";;
+    experimental-features) tiledb_experimental_features="ON";;
     *) die "Unknown option: --enable-$en" ;;
   esac
 done
@@ -189,6 +209,7 @@ ${cmake} -DCMAKE_BUILD_TYPE=${build_type} \
     -DCMAKE_C_COMPILER="${c_compiler}" \
     -DCMAKE_CXX_COMPILER="${cxx_compiler}" \
     -DCMAKE_PREFIX_PATH="${dependency_dir}" \
+    -DTILEDB_ASSERTIONS=${tiledb_assertions} \
     -DTILEDB_VERBOSE=${tiledb_verbose} \
     -DTILEDB_HDFS=${tiledb_hdfs} \
     -DTILEDB_S3=${tiledb_s3} \
@@ -203,8 +224,12 @@ ${cmake} -DCMAKE_BUILD_TYPE=${build_type} \
     -DTILEDB_TESTS=${tiledb_tests} \
     -DTILEDB_CCACHE=${tiledb_ccache} \
     -DTILEDB_ARROW_TESTS=${tiledb_arrow_tests} \
+    -DTILEDB_CRC32=${tiledb_build_crc32} \
+    -DTILEDB_WEBP=${tiledb_build_webp} \
+    -DTILEDB_ABSEIL=${tiledb_build_abseil} \
     -DTILEDB_FORCE_ALL_DEPS=${tiledb_force_all_deps} \
     -DSANITIZER="${sanitizer}" \
+    -DTILEDB_EXPERIMENTAL_FEATURES=${tiledb_experimental_features} \
     ${tiledb_disable_avx2} \
     "${source_dir}" || die "failed to configure the project"
 

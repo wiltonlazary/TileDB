@@ -1,23 +1,25 @@
 name: unit-test-standalone
 on:
-  push:
-  pull_request:
+  workflow_call:
 
 env:
   BACKWARDS_COMPATIBILITY_ARRAYS: OFF
+  TILEDB_ASSERTIONS: ON
   TILEDB_S3: OFF
   TILEDB_AZURE: OFF
   TILEDB_GCS: OFF
   TILEDB_SERIALIZATION: OFF
-  TILEDB_STATIC: OFF
+  TILEDB_STATIC: ON
   TILEDB_TOOLS: ON
+  TILEDB_WEBP: ON
 
 jobs:
   build:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-latest, ubuntu-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest]
+      fail-fast: false
     name: Build - ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v2
@@ -32,15 +34,7 @@ jobs:
           printenv
         shell: bash
 
-      - name: 'Install system headers (OSX 10.14 only)'
-        run: |
-          set -e pipefail
-          open /Library/Developer/CommandLineTools/Packages/macOS_SDK_headers_for_macOS_10.14.pkg
-          sudo installer -pkg /Library/Developer/CommandLineTools/Packages/macOS_SDK_headers_for_macOS_10.14.pkg -allowUntrusted -target /
-        shell: bash
-        if: ${{ runner.os == 'macOS' && env.imageName == 'macOS-10.14' }}
-
-      - name: 'Build and run interval unit test'
+      - name: 'Build and run standalone unit tests'
         id: test
         run: |
 
@@ -51,12 +45,16 @@ jobs:
             -DTILEDB_AZURE=${TILEDB_AZURE}\
             -DTILEDB_GCS=${TILEDB_GCS} \
             -DTILEDB_S3=${TILEDB_S3} \
-            -DTILEDB_SERIALIZATION=${TILEDB_SERIALIZATION}
+            -DTILEDB_SERIALIZATION=${TILEDB_SERIALIZATION} \
+            -DTILEDB_WEBP=${TILEDB_WEBP} \
+            -DTILEDB_ASSERTIONS=${TILEDB_ASSERTIONS} \
+            -DTILEDB_STATIC=${TILEDB_STATIC}
           make -j4
           # Build all unit tests
           make -C tiledb tests -j4
           # Run all unit tests
-          make -C tiledb test ARGS="-R '^unit_'"
+          make -C tiledb test ARGS="-R '^unit_'" -R "test_assert"
+          make -C tiledb test ARGS="-R 'test_ci_asserts'"
 
           popd
       - name: "Print log files (failed build only)"

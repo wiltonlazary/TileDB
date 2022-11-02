@@ -105,6 +105,15 @@ class FragmentInfo {
     return std::string(uri_c);
   }
 
+  /** Returns the name of the fragment with the given index. */
+  std::string fragment_name(uint32_t fid) const {
+    auto& ctx = ctx_.get();
+    const char* name_c;
+    ctx.handle_error(tiledb_fragment_info_get_fragment_name(
+        ctx.ptr().get(), fragment_info_.get(), fid, &name_c));
+    return std::string(name_c);
+  }
+
   /**
    * Retrieves the non-empty domain of the fragment with the given index
    * on the given dimension index.
@@ -332,6 +341,15 @@ class FragmentInfo {
     return ret;
   }
 
+  /** Returns the total number of cells written in the loaded fragments. */
+  uint64_t total_cell_num() const {
+    auto& ctx = ctx_.get();
+    uint64_t ret;
+    ctx.handle_error(tiledb_fragment_info_get_total_cell_num(
+        ctx.ptr().get(), fragment_info_.get(), &ret));
+    return ret;
+  }
+
   /** Returns the version of the fragment with the given index. */
   uint32_t version(uint32_t fid) const {
     auto& ctx = ctx_.get();
@@ -348,6 +366,15 @@ class FragmentInfo {
     ctx.handle_error(tiledb_fragment_info_get_array_schema(
         ctx.ptr().get(), fragment_info_.get(), fid, &schema));
     return ArraySchema(ctx, schema);
+  }
+
+  /** Returns the array schema name of the fragment with the given index. */
+  std::string array_schema_name(uint32_t fid) const {
+    auto& ctx = ctx_.get();
+    const char* schema_name;
+    ctx.handle_error(tiledb_fragment_info_get_array_schema_name(
+        ctx.ptr().get(), fragment_info_.get(), fid, &schema_name));
+    return std::string(schema_name);
   }
 
   /**
@@ -399,6 +426,11 @@ class FragmentInfo {
     auto& ctx = ctx_.get();
     ctx.handle_error(
         tiledb_fragment_info_dump(ctx.ptr().get(), fragment_info_.get(), out));
+  }
+
+  /** Returns the C TileDB context object. */
+  std::shared_ptr<tiledb_fragment_info_t> ptr() const {
+    return fragment_info_;
   }
 
  private:

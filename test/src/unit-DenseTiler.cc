@@ -30,13 +30,13 @@
  * Tests the `DenseTiler` class.
  */
 
-#include "test/src/helpers.h"
+#include "test/support/src/helpers.h"
 #include "tiledb/sm/c_api/tiledb.h"
 #include "tiledb/sm/c_api/tiledb_struct_def.h"
 #include "tiledb/sm/cpp_api/tiledb"
-#include "tiledb/sm/query/dense_tiler.h"
+#include "tiledb/sm/query/writers/dense_tiler.h"
 
-#include <catch.hpp>
+#include <test/support/tdb_catch.h>
 #include <iostream>
 
 using namespace tiledb;
@@ -81,9 +81,9 @@ struct DenseTilerFx {
   void add_ranges(
       const std::vector<const void*>& ranges,
       uint64_t range_size,
-      Subarray* subarray);
+      tiledb::sm::Subarray* subarray);
   template <class T>
-  bool check_tile(Tile* tile, const std::vector<T>& data);
+  bool check_tile(Tile& tile, const std::vector<T>& data);
 };
 
 DenseTilerFx::DenseTilerFx() {
@@ -144,7 +144,7 @@ void DenseTilerFx::create_array(
 void DenseTilerFx::add_ranges(
     const std::vector<const void*>& ranges,
     uint64_t range_size,
-    Subarray* subarray) {
+    tiledb::sm::Subarray* subarray) {
   for (size_t i = 0; i < ranges.size(); ++i)
     CHECK(subarray->add_range((uint32_t)i, Range(ranges[i], range_size)).ok());
 }
@@ -171,10 +171,10 @@ void DenseTilerFx::close_array() {
 }
 
 template <class T>
-bool DenseTilerFx::check_tile(Tile* tile, const std::vector<T>& data) {
+bool DenseTilerFx::check_tile(Tile& tile, const std::vector<T>& data) {
   std::vector<T> tile_data(data.size());
-  CHECK(tile->size() == data.size() * sizeof(T));
-  CHECK(tile->read(&tile_data[0], data.size() * sizeof(T)).ok());
+  CHECK(tile.size() == data.size() * sizeof(T));
+  CHECK(tile.read(&tile_data[0], 0, data.size() * sizeof(T)).ok());
   CHECK(tile_data == data);
   return tile_data == data;
 }
@@ -203,7 +203,11 @@ TEST_CASE_METHOD(
   // Create subarray
   open_array(array_name, TILEDB_READ);
   int32_t sub1[] = {3, 6};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1}, sizeof(sub1), &subarray1);
 
   // Create DenseTiler
@@ -220,7 +224,11 @@ TEST_CASE_METHOD(
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub2[] = {6, 9};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2}, sizeof(sub2), &subarray2);
 
   // Create DenseTiler
@@ -262,7 +270,11 @@ TEST_CASE_METHOD(
   // Create subarray
   open_array(array_name, TILEDB_READ);
   int32_t sub1[] = {3, 6};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1}, sizeof(sub1), &subarray1);
 
   // Create DenseTiler
@@ -294,7 +306,11 @@ TEST_CASE_METHOD(
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub2[] = {7, 8};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2}, sizeof(sub2), &subarray2);
 
   // Create DenseTiler
@@ -314,7 +330,11 @@ TEST_CASE_METHOD(
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub3[] = {7, 8};
-  Subarray subarray3(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray3(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub3}, sizeof(sub3), &subarray3);
 
   // Create DenseTiler
@@ -359,58 +379,94 @@ TEST_CASE_METHOD(
   // Create subarray
   open_array(array_name, TILEDB_READ);
   int32_t sub1[] = {3, 6};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1}, sizeof(sub1), &subarray1);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler1(&buffers, &subarray1, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile1_0;
-  CHECK(!tiler1.get_tile(0, "foo", &tile1_0).ok());
-  CHECK(!tiler1.get_tile(10, "a", &tile1_0).ok());
-  CHECK(tiler1.get_tile(0, "a", &tile1_0).ok());
+  WriterTile tile1_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(!tiler1.get_tile(0, "foo", tile1_0).ok());
+  CHECK(!tiler1.get_tile(10, "a", tile1_0).ok());
+  CHECK(tiler1.get_tile(0, "a", tile1_0).ok());
   std::vector<int32_t> c_data1_0 = {fill_value, fill_value, 1, 2, 3};
-  CHECK(check_tile<int32_t>(&tile1_0, c_data1_0));
+  CHECK(check_tile<int32_t>(tile1_0.fixed_tile(), c_data1_0));
 
   // Test get tile 1
-  Tile tile1_1;
-  CHECK(tiler1.get_tile(1, "a", &tile1_1).ok());
+  WriterTile tile1_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(1, "a", tile1_1).ok());
   std::vector<int32_t> c_data1_1 = {
       4, fill_value, fill_value, fill_value, fill_value};
-  CHECK(check_tile<int32_t>(&tile1_1, c_data1_1));
+  CHECK(check_tile<int32_t>(tile1_1.fixed_tile(), c_data1_1));
 
   // Create new subarray
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub2[] = {7, 10};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2}, sizeof(sub2), &subarray2);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler2(&buffers, &subarray2, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile2;
-  CHECK(tiler2.get_tile(0, "a", &tile2).ok());
+  WriterTile tile2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler2.get_tile(0, "a", tile2).ok());
   std::vector<int32_t> c_data2 = {fill_value, 1, 2, 3, 4};
-  CHECK(check_tile<int32_t>(&tile2, c_data2));
+  CHECK(check_tile<int32_t>(tile2.fixed_tile(), c_data2));
 
   // Create new subarray (col-major)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub3[] = {7, 10};
-  Subarray subarray3(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray3(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub3}, sizeof(sub3), &subarray3);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler3(&buffers, &subarray3, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile3;
-  CHECK(tiler3.get_tile(0, "a", &tile3).ok());
+  WriterTile tile3(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(0, "a", tile3).ok());
   std::vector<int32_t> c_data3 = {fill_value, 1, 2, 3, 4};
-  CHECK(check_tile<int32_t>(&tile3, c_data3));
+  CHECK(check_tile<int32_t>(tile3.fixed_tile(), c_data3));
 
   // Clean up
   close_array();
@@ -441,26 +497,42 @@ TEST_CASE_METHOD(
   // Create subarray
   open_array(array_name, TILEDB_READ);
   int32_t sub1[] = {3, 6};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1}, sizeof(sub1), &subarray1);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler1(&buffers, &subarray1, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile1_0;
-  CHECK(!tiler1.get_tile(0, "foo", &tile1_0).ok());
-  CHECK(!tiler1.get_tile(10, "a", &tile1_0).ok());
-  CHECK(tiler1.get_tile(0, "a", &tile1_0).ok());
+  WriterTile tile1_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(!tiler1.get_tile(0, "foo", tile1_0).ok());
+  CHECK(!tiler1.get_tile(10, "a", tile1_0).ok());
+  CHECK(tiler1.get_tile(0, "a", tile1_0).ok());
   std::vector<int32_t> c_data1_0 = {fill_value, fill_value, 1, 2, 3};
-  CHECK(check_tile<int32_t>(&tile1_0, c_data1_0));
+  CHECK(check_tile<int32_t>(tile1_0.fixed_tile(), c_data1_0));
 
   // Test get tile 1
-  Tile tile1_1;
-  CHECK(tiler1.get_tile(1, "a", &tile1_1).ok());
+  WriterTile tile1_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(1, "a", tile1_1).ok());
   std::vector<int32_t> c_data1_1 = {
       4, fill_value, fill_value, fill_value, fill_value};
-  CHECK(check_tile<int32_t>(&tile1_1, c_data1_1));
+  CHECK(check_tile<int32_t>(tile1_1.fixed_tile(), c_data1_1));
 
   // Clean up
   close_array();
@@ -491,26 +563,42 @@ TEST_CASE_METHOD(
   // Create subarray
   open_array(array_name, TILEDB_READ);
   int32_t sub1[] = {-2, 1};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1}, sizeof(sub1), &subarray1);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler1(&buffers, &subarray1, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile1_0;
-  CHECK(!tiler1.get_tile(0, "foo", &tile1_0).ok());
-  CHECK(!tiler1.get_tile(10, "a", &tile1_0).ok());
-  CHECK(tiler1.get_tile(0, "a", &tile1_0).ok());
+  WriterTile tile1_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(!tiler1.get_tile(0, "foo", tile1_0).ok());
+  CHECK(!tiler1.get_tile(10, "a", tile1_0).ok());
+  CHECK(tiler1.get_tile(0, "a", tile1_0).ok());
   std::vector<int32_t> c_data1_0 = {fill_value, fill_value, 1, 2, 3};
-  CHECK(check_tile<int32_t>(&tile1_0, c_data1_0));
+  CHECK(check_tile<int32_t>(tile1_0.fixed_tile(), c_data1_0));
 
   // Test get tile 1
-  Tile tile1_1;
-  CHECK(tiler1.get_tile(1, "a", &tile1_1).ok());
+  WriterTile tile1_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(1, "a", tile1_1).ok());
   std::vector<int32_t> c_data1_1 = {
       4, fill_value, fill_value, fill_value, fill_value};
-  CHECK(check_tile<int32_t>(&tile1_1, c_data1_1));
+  CHECK(check_tile<int32_t>(tile1_1.fixed_tile(), c_data1_1));
 
   // Clean up
   close_array();
@@ -545,7 +633,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {4, 6};
   int32_t sub1_1[] = {18, 22};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
@@ -563,7 +655,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub2_0[] = {7, 9};
   int32_t sub2_1[] = {23, 27};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2_0, sub2_1}, sizeof(sub2_0), &subarray2);
 
   // Create DenseTiler
@@ -581,7 +677,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub3_0[] = {4, 6};
   int32_t sub3_1[] = {18, 22};
-  Subarray subarray3(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray3(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub3_0, sub3_1}, sizeof(sub3_0), &subarray3);
 
   // Create DenseTiler
@@ -599,7 +699,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub4_0[] = {7, 10};
   int32_t sub4_1[] = {23, 27};
-  Subarray subarray4(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray4(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub4_0, sub4_1}, sizeof(sub4_0), &subarray4);
 
   // Create DenseTiler
@@ -645,7 +749,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {4, 6};
   int32_t sub1_1[] = {18, 22};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
@@ -663,7 +771,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub2_0[] = {7, 9};
   int32_t sub2_1[] = {23, 27};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2_0, sub2_1}, sizeof(sub2_0), &subarray2);
 
   // Create DenseTiler
@@ -681,7 +793,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub3_0[] = {4, 6};
   int32_t sub3_1[] = {18, 22};
-  Subarray subarray3(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray3(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub3_0, sub3_1}, sizeof(sub3_0), &subarray3);
 
   // Create DenseTiler
@@ -699,7 +815,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub4_0[] = {7, 10};
   int32_t sub4_1[] = {23, 27};
-  Subarray subarray4(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray4(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub4_0, sub4_1}, sizeof(sub4_0), &subarray4);
 
   // Create DenseTiler
@@ -745,7 +865,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {4, 6};
   int32_t sub1_1[] = {18, 22};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
@@ -800,7 +924,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub2_0[] = {3, 5};
   int32_t sub2_1[] = {13, 18};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2_0, sub2_1}, sizeof(sub2_0), &subarray2);
 
   // Create DenseTiler
@@ -822,7 +950,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub3_0[] = {4, 6};
   int32_t sub3_1[] = {18, 22};
-  Subarray subarray3(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray3(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub3_0, sub3_1}, sizeof(sub3_0), &subarray3);
 
   // Create DenseTiler
@@ -881,7 +1013,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub4_0[] = {3, 5};
   int32_t sub4_1[] = {13, 18};
-  Subarray subarray4(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray4(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub4_0, sub4_1}, sizeof(sub4_0), &subarray4);
 
   // Create DenseTiler
@@ -932,7 +1068,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {4, 6};
   int32_t sub1_1[] = {18, 22};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
@@ -991,7 +1131,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub2_0[] = {3, 5};
   int32_t sub2_1[] = {13, 18};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2_0, sub2_1}, sizeof(sub2_0), &subarray2);
 
   // Create DenseTiler
@@ -1014,7 +1158,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub3_0[] = {4, 6};
   int32_t sub3_1[] = {18, 22};
-  Subarray subarray3(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray3(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub3_0, sub3_1}, sizeof(sub3_0), &subarray3);
 
   // Create DenseTiler
@@ -1069,7 +1217,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub4_0[] = {3, 5};
   int32_t sub4_1[] = {13, 18};
-  Subarray subarray4(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray4(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub4_0, sub4_1}, sizeof(sub4_0), &subarray4);
 
   // Create DenseTiler
@@ -1119,7 +1271,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {4, 9};
   int32_t sub1_1[] = {11, 20};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
@@ -1180,7 +1336,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {1, 5};
   int32_t sub1_1[] = {8, 12};
-  Subarray subarray1(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
@@ -1242,15 +1402,25 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {4, 6};
   int32_t sub1_1[] = {18, 22};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler1(&buffers, &subarray1, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile1_0;
-  CHECK(tiler1.get_tile(0, "a", &tile1_0).ok());
+  WriterTile tile1_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(0, "a", tile1_0).ok());
   std::vector<int32_t> c_data1_0(50);
   for (int i = 0; i <= 36; ++i)
     c_data1_0[i] = fill_value;
@@ -1260,11 +1430,17 @@ TEST_CASE_METHOD(
     c_data1_0[i] = fill_value;
   for (int i = 47; i <= 49; ++i)
     c_data1_0[i] = i - 41;
-  CHECK(check_tile<int32_t>(&tile1_0, c_data1_0));
+  CHECK(check_tile<int32_t>(tile1_0.fixed_tile(), c_data1_0));
 
   // Test get tile 1
-  Tile tile1_1;
-  CHECK(tiler1.get_tile(1, "a", &tile1_1).ok());
+  WriterTile tile1_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(1, "a", tile1_1).ok());
   std::vector<int32_t> c_data1_1(50);
   for (int i = 0; i <= 29; ++i)
     c_data1_1[i] = fill_value;
@@ -1276,11 +1452,17 @@ TEST_CASE_METHOD(
     c_data1_1[i] = i - 31;
   for (int i = 42; i <= 49; ++i)
     c_data1_1[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile1_1, c_data1_1));
+  CHECK(check_tile<int32_t>(tile1_1.fixed_tile(), c_data1_1));
 
   // Test get tile 2
-  Tile tile1_2;
-  CHECK(tiler1.get_tile(2, "a", &tile1_2).ok());
+  WriterTile tile1_2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(2, "a", tile1_2).ok());
   std::vector<int32_t> c_data1_2(50);
   for (int i = 0; i <= 6; ++i)
     c_data1_2[i] = fill_value;
@@ -1288,24 +1470,34 @@ TEST_CASE_METHOD(
     c_data1_2[i] = i + 4;
   for (int i = 10; i <= 49; ++i)
     c_data1_2[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile1_2, c_data1_2));
+  CHECK(check_tile<int32_t>(tile1_2.fixed_tile(), c_data1_2));
 
   // Test get tile 3
-  Tile tile1_3;
-  CHECK(tiler1.get_tile(3, "a", &tile1_3).ok());
+  WriterTile tile1_3(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(3, "a", tile1_3).ok());
   std::vector<int32_t> c_data1_3(50);
   for (int i = 0; i <= 1; ++i)
     c_data1_3[i] = i + 14;
   for (int i = 2; i <= 49; ++i)
     c_data1_3[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile1_3, c_data1_3));
+  CHECK(check_tile<int32_t>(tile1_3.fixed_tile(), c_data1_3));
 
   // Create subarray (single tile)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub2_0[] = {3, 5};
   int32_t sub2_1[] = {13, 18};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2_0, sub2_1}, sizeof(sub2_0), &subarray2);
 
   // Create DenseTiler
@@ -1315,8 +1507,14 @@ TEST_CASE_METHOD(
   DenseTiler<int32_t> tiler2(&buffers, &subarray2, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile2_0;
-  CHECK(tiler2.get_tile(0, "a", &tile2_0).ok());
+  WriterTile tile2_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler2.get_tile(0, "a", tile2_0).ok());
   std::vector<int32_t> c_data2_0(50);
   for (int i = 0; i <= 21; ++i)
     c_data2_0[i] = fill_value;
@@ -1332,14 +1530,18 @@ TEST_CASE_METHOD(
     c_data2_0[i] = i - 29;
   for (int i = 48; i <= 49; ++i)
     c_data2_0[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile2_0, c_data2_0));
+  CHECK(check_tile<int32_t>(tile2_0.fixed_tile(), c_data2_0));
 
   // Create subarray (multiple tiles, col-major)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub3_0[] = {4, 6};
   int32_t sub3_1[] = {18, 22};
-  Subarray subarray3(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray3(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub3_0, sub3_1}, sizeof(sub3_0), &subarray3);
 
   // Create DenseTiler
@@ -1349,8 +1551,14 @@ TEST_CASE_METHOD(
   DenseTiler<int32_t> tiler3(&buffers, &subarray3, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile3_0;
-  CHECK(tiler3.get_tile(0, "a", &tile3_0).ok());
+  WriterTile tile3_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(0, "a", tile3_0).ok());
   std::vector<int32_t> c_data3_0(50);
   for (int i = 0; i <= 36; ++i)
     c_data3_0[i] = fill_value;
@@ -1360,11 +1568,17 @@ TEST_CASE_METHOD(
     c_data3_0[i] = fill_value;
   for (int i = 47; i <= 49; ++i)
     c_data3_0[i] = i - 41;
-  CHECK(check_tile<int32_t>(&tile3_0, c_data3_0));
+  CHECK(check_tile<int32_t>(tile3_0.fixed_tile(), c_data3_0));
 
   // Test get tile 1
-  Tile tile3_1;
-  CHECK(tiler3.get_tile(1, "a", &tile3_1).ok());
+  WriterTile tile3_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(1, "a", tile3_1).ok());
   std::vector<int32_t> c_data3_1(50);
   for (int i = 0; i <= 29; ++i)
     c_data3_1[i] = fill_value;
@@ -1376,11 +1590,17 @@ TEST_CASE_METHOD(
     c_data3_1[i] = i - 31;
   for (int i = 42; i <= 49; ++i)
     c_data3_1[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile3_1, c_data3_1));
+  CHECK(check_tile<int32_t>(tile3_1.fixed_tile(), c_data3_1));
 
   // Test get tile 2
-  Tile tile3_2;
-  CHECK(tiler3.get_tile(2, "a", &tile3_2).ok());
+  WriterTile tile3_2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(2, "a", tile3_2).ok());
   std::vector<int32_t> c_data3_2(50);
   for (int i = 0; i <= 6; ++i)
     c_data3_2[i] = fill_value;
@@ -1388,24 +1608,34 @@ TEST_CASE_METHOD(
     c_data3_2[i] = i + 4;
   for (int i = 10; i <= 49; ++i)
     c_data3_2[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile3_2, c_data3_2));
+  CHECK(check_tile<int32_t>(tile3_2.fixed_tile(), c_data3_2));
 
   // Test get tile 3
-  Tile tile3_3;
-  CHECK(tiler3.get_tile(3, "a", &tile3_3).ok());
+  WriterTile tile3_3(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(3, "a", tile3_3).ok());
   std::vector<int32_t> c_data3_3(50);
   for (int i = 0; i <= 1; ++i)
     c_data3_3[i] = i + 14;
   for (int i = 2; i <= 49; ++i)
     c_data3_3[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile3_3, c_data3_3));
+  CHECK(check_tile<int32_t>(tile3_3.fixed_tile(), c_data3_3));
 
   // Create subarray (single tile, col-major)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub4_0[] = {3, 5};
   int32_t sub4_1[] = {13, 18};
-  Subarray subarray4(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray4(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub4_0, sub4_1}, sizeof(sub4_0), &subarray4);
 
   // Create DenseTiler
@@ -1415,8 +1645,14 @@ TEST_CASE_METHOD(
   DenseTiler<int32_t> tiler4(&buffers, &subarray4, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile4_0;
-  CHECK(tiler4.get_tile(0, "a", &tile4_0).ok());
+  WriterTile tile4_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler4.get_tile(0, "a", tile4_0).ok());
   std::vector<int32_t> c_data4_0(50);
   for (int i = 0; i <= 21; ++i)
     c_data4_0[i] = fill_value;
@@ -1432,7 +1668,7 @@ TEST_CASE_METHOD(
     c_data4_0[i] = i - 29;
   for (int i = 48; i <= 49; ++i)
     c_data4_0[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile4_0, c_data4_0));
+  CHECK(check_tile<int32_t>(tile4_0.fixed_tile(), c_data4_0));
 
   // Clean up
   close_array();
@@ -1468,15 +1704,25 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {4, 6};
   int32_t sub1_1[] = {18, 22};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler1(&buffers, &subarray1, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile1_0;
-  CHECK(tiler1.get_tile(0, "a", &tile1_0).ok());
+  WriterTile tile1_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(0, "a", tile1_0).ok());
   std::vector<int32_t> c_data1_0(50);
   for (int i = 0; i <= 37; ++i)
     c_data1_0[i] = fill_value;
@@ -1490,11 +1736,17 @@ TEST_CASE_METHOD(
     c_data1_0[i] = fill_value;
   c_data1_0[48] = 3;
   c_data1_0[49] = 8;
-  CHECK(check_tile<int32_t>(&tile1_0, c_data1_0));
+  CHECK(check_tile<int32_t>(tile1_0.fixed_tile(), c_data1_0));
 
   // Test get tile 1
-  Tile tile1_1;
-  CHECK(tiler1.get_tile(1, "a", &tile1_1).ok());
+  WriterTile tile1_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(1, "a", tile1_1).ok());
   std::vector<int32_t> c_data1_1(50);
   for (int i = 0; i <= 34; ++i)
     c_data1_1[i] = fill_value;
@@ -1507,11 +1759,17 @@ TEST_CASE_METHOD(
   c_data1_1[45] = 13;
   for (int i = 46; i <= 49; ++i)
     c_data1_1[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile1_1, c_data1_1));
+  CHECK(check_tile<int32_t>(tile1_1.fixed_tile(), c_data1_1));
 
   // Test get tile 2
-  Tile tile1_2;
-  CHECK(tiler1.get_tile(2, "a", &tile1_2).ok());
+  WriterTile tile1_2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(2, "a", tile1_2).ok());
   std::vector<int32_t> c_data1_2(50);
   for (int i = 0; i <= 2; ++i)
     c_data1_2[i] = fill_value;
@@ -1523,11 +1781,17 @@ TEST_CASE_METHOD(
   c_data1_2[9] = 10;
   for (int i = 10; i <= 49; ++i)
     c_data1_2[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile1_2, c_data1_2));
+  CHECK(check_tile<int32_t>(tile1_2.fixed_tile(), c_data1_2));
 
   // Test get tile 3
-  Tile tile1_3;
-  CHECK(tiler1.get_tile(3, "a", &tile1_3).ok());
+  WriterTile tile1_3(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(3, "a", tile1_3).ok());
   std::vector<int32_t> c_data1_3(50);
   c_data1_3[0] = 14;
   for (int i = 1; i <= 4; ++i)
@@ -1535,14 +1799,18 @@ TEST_CASE_METHOD(
   c_data1_3[5] = 15;
   for (int i = 6; i <= 49; ++i)
     c_data1_3[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile1_3, c_data1_3));
+  CHECK(check_tile<int32_t>(tile1_3.fixed_tile(), c_data1_3));
 
   // Create subarray (single tile)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub2_0[] = {3, 5};
   int32_t sub2_1[] = {13, 18};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2_0, sub2_1}, sizeof(sub2_0), &subarray2);
 
   // Create DenseTiler
@@ -1552,8 +1820,14 @@ TEST_CASE_METHOD(
   DenseTiler<int32_t> tiler2(&buffers, &subarray2, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile2_0;
-  CHECK(tiler2.get_tile(0, "a", &tile2_0).ok());
+  WriterTile tile2_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler2.get_tile(0, "a", tile2_0).ok());
   std::vector<int32_t> c_data2_0(50);
   for (int i = 0; i <= 11; ++i)
     c_data2_0[i] = fill_value;
@@ -1587,14 +1861,18 @@ TEST_CASE_METHOD(
   c_data2_0[39] = 18;
   for (int i = 40; i <= 49; ++i)
     c_data2_0[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile2_0, c_data2_0));
+  CHECK(check_tile<int32_t>(tile2_0.fixed_tile(), c_data2_0));
 
   // Create subarray (multiple tiles, col-major)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub3_0[] = {4, 6};
   int32_t sub3_1[] = {18, 22};
-  Subarray subarray3(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray3(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub3_0, sub3_1}, sizeof(sub3_0), &subarray3);
 
   // Create DenseTiler
@@ -1604,8 +1882,14 @@ TEST_CASE_METHOD(
   DenseTiler<int32_t> tiler3(&buffers, &subarray3, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile3_0;
-  CHECK(tiler3.get_tile(0, "a", &tile3_0).ok());
+  WriterTile tile3_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(0, "a", tile3_0).ok());
   std::vector<int32_t> c_data3_0(50);
   for (int i = 0; i <= 37; ++i)
     c_data3_0[i] = fill_value;
@@ -1619,11 +1903,17 @@ TEST_CASE_METHOD(
     c_data3_0[i] = fill_value;
   c_data3_0[48] = 3;
   c_data3_0[49] = 8;
-  CHECK(check_tile<int32_t>(&tile3_0, c_data3_0));
+  CHECK(check_tile<int32_t>(tile3_0.fixed_tile(), c_data3_0));
 
   // Test get tile 1
-  Tile tile3_1;
-  CHECK(tiler3.get_tile(1, "a", &tile3_1).ok());
+  WriterTile tile3_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(1, "a", tile3_1).ok());
   std::vector<int32_t> c_data3_1(50);
   for (int i = 0; i <= 34; ++i)
     c_data3_1[i] = fill_value;
@@ -1636,11 +1926,17 @@ TEST_CASE_METHOD(
   c_data3_1[45] = 13;
   for (int i = 46; i <= 49; ++i)
     c_data3_1[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile3_1, c_data3_1));
+  CHECK(check_tile<int32_t>(tile3_1.fixed_tile(), c_data3_1));
 
   // Test get tile 2
-  Tile tile3_2;
-  CHECK(tiler3.get_tile(2, "a", &tile3_2).ok());
+  WriterTile tile3_2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(2, "a", tile3_2).ok());
   std::vector<int32_t> c_data3_2(50);
   for (int i = 0; i <= 2; ++i)
     c_data3_2[i] = fill_value;
@@ -1652,11 +1948,17 @@ TEST_CASE_METHOD(
   c_data3_2[9] = 10;
   for (int i = 10; i <= 49; ++i)
     c_data3_2[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile3_2, c_data3_2));
+  CHECK(check_tile<int32_t>(tile3_2.fixed_tile(), c_data3_2));
 
   // Test get tile 3
-  Tile tile3_3;
-  CHECK(tiler3.get_tile(3, "a", &tile3_3).ok());
+  WriterTile tile3_3(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(3, "a", tile3_3).ok());
   std::vector<int32_t> c_data3_3(50);
   c_data3_3[0] = 14;
   for (int i = 1; i <= 4; ++i)
@@ -1664,14 +1966,18 @@ TEST_CASE_METHOD(
   c_data3_3[5] = 15;
   for (int i = 6; i <= 49; ++i)
     c_data3_3[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile3_3, c_data3_3));
+  CHECK(check_tile<int32_t>(tile3_3.fixed_tile(), c_data3_3));
 
   // Create subarray (single tile, col-major)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub4_0[] = {3, 5};
   int32_t sub4_1[] = {13, 18};
-  Subarray subarray4(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray4(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub4_0, sub4_1}, sizeof(sub4_0), &subarray4);
 
   // Create DenseTiler
@@ -1681,8 +1987,14 @@ TEST_CASE_METHOD(
   DenseTiler<int32_t> tiler4(&buffers, &subarray4, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile4_0;
-  CHECK(tiler4.get_tile(0, "a", &tile4_0).ok());
+  WriterTile tile4_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler4.get_tile(0, "a", tile4_0).ok());
   std::vector<int32_t> c_data4_0(50);
   for (int i = 0; i <= 11; ++i)
     c_data4_0[i] = fill_value;
@@ -1716,7 +2028,7 @@ TEST_CASE_METHOD(
   c_data4_0[39] = 18;
   for (int i = 40; i <= 49; ++i)
     c_data4_0[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile4_0, c_data4_0));
+  CHECK(check_tile<int32_t>(tile4_0.fixed_tile(), c_data4_0));
 
   // Clean up
   close_array();
@@ -1755,31 +2067,47 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {4, 9};
   int32_t sub1_1[] = {11, 20};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler1(&buffers, &subarray1, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile1_0;
-  CHECK(tiler1.get_tile(0, "a", &tile1_0).ok());
+  WriterTile tile1_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(0, "a", tile1_0).ok());
   std::vector<int32_t> c_data1_0(50);
   for (int i = 0; i <= 29; ++i)
     c_data1_0[i] = fill_value;
   for (int i = 30; i <= 49; ++i)
     c_data1_0[i] = i - 29;
-  CHECK(check_tile<int32_t>(&tile1_0, c_data1_0));
+  CHECK(check_tile<int32_t>(tile1_0.fixed_tile(), c_data1_0));
 
   // Test get tile 1
-  Tile tile1_1;
-  CHECK(tiler1.get_tile(1, "a", &tile1_1).ok());
+  WriterTile tile1_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(1, "a", tile1_1).ok());
   std::vector<int32_t> c_data1_1(50);
   for (int i = 0; i <= 39; ++i)
     c_data1_1[i] = i + 21;
   for (int i = 40; i <= 49; ++i)
     c_data1_1[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile1_1, c_data1_1));
+  CHECK(check_tile<int32_t>(tile1_1.fixed_tile(), c_data1_1));
 
   // Clean up
   close_array();
@@ -1816,31 +2144,47 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {1, 5};
   int32_t sub1_1[] = {8, 12};
-  Subarray subarray1(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler1(&buffers, &subarray1, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile1_0;
-  CHECK(tiler1.get_tile(0, "a", &tile1_0).ok());
+  WriterTile tile1_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(0, "a", tile1_0).ok());
   std::vector<int32_t> c_data1_0(50);
   for (int i = 0; i <= 34; ++i)
     c_data1_0[i] = fill_value;
   for (int i = 35; i <= 49; ++i)
     c_data1_0[i] = i - 34;
-  CHECK(check_tile<int32_t>(&tile1_0, c_data1_0));
+  CHECK(check_tile<int32_t>(tile1_0.fixed_tile(), c_data1_0));
 
   // Test get tile 1
-  Tile tile1_1;
-  CHECK(tiler1.get_tile(1, "a", &tile1_1).ok());
+  WriterTile tile1_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(1, "a", tile1_1).ok());
   std::vector<int32_t> c_data1_1(50);
   for (int i = 0; i <= 9; ++i)
     c_data1_1[i] = i + 16;
   for (int i = 10; i <= 49; ++i)
     c_data1_1[i] = fill_value;
-  CHECK(check_tile<int32_t>(&tile1_1, c_data1_1));
+  CHECK(check_tile<int32_t>(tile1_1.fixed_tile(), c_data1_1));
 
   // Clean up
   close_array();
@@ -1871,22 +2215,38 @@ TEST_CASE_METHOD(
   // Create subarray
   open_array(array_name, TILEDB_READ);
   int32_t sub1[] = {3, 6};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1}, sizeof(sub1), &subarray1);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler1(&buffers, &subarray1, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile1_0;
-  CHECK(tiler1.get_tile(0, "a", &tile1_0).ok());
+  WriterTile tile1_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      2 * sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(0, "a", tile1_0).ok());
   std::vector<int32_t> c_data1_0 = {
       fill_value, fill_value, fill_value, fill_value, 1, 11, 2, 22, 3, 33};
-  CHECK(check_tile<int32_t>(&tile1_0, c_data1_0));
+  CHECK(check_tile<int32_t>(tile1_0.fixed_tile(), c_data1_0));
 
   // Test get tile 1
-  Tile tile1_1;
-  CHECK(tiler1.get_tile(1, "a", &tile1_1).ok());
+  WriterTile tile1_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      2 * sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(1, "a", tile1_1).ok());
   std::vector<int32_t> c_data1_1 = {4,
                                     44,
                                     fill_value,
@@ -1897,41 +2257,61 @@ TEST_CASE_METHOD(
                                     fill_value,
                                     fill_value,
                                     fill_value};
-  CHECK(check_tile<int32_t>(&tile1_1, c_data1_1));
+  CHECK(check_tile<int32_t>(tile1_1.fixed_tile(), c_data1_1));
 
   // Create new subarray
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub2[] = {7, 10};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2}, sizeof(sub2), &subarray2);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler2(&buffers, &subarray2, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile2;
-  CHECK(tiler2.get_tile(0, "a", &tile2).ok());
+  WriterTile tile2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      2 * sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler2.get_tile(0, "a", tile2).ok());
   std::vector<int32_t> c_data2 = {
       fill_value, fill_value, 1, 11, 2, 22, 3, 33, 4, 44};
-  CHECK(check_tile<int32_t>(&tile2, c_data2));
+  CHECK(check_tile<int32_t>(tile2.fixed_tile(), c_data2));
 
   // Create new subarray (col-major)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub3[] = {7, 10};
-  Subarray subarray3(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray3(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub3}, sizeof(sub3), &subarray3);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler3(&buffers, &subarray3, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile3;
-  CHECK(tiler3.get_tile(0, "a", &tile3).ok());
+  WriterTile tile3(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      2 * sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(0, "a", tile3).ok());
   std::vector<int32_t> c_data3 = {
       fill_value, fill_value, 1, 11, 2, 22, 3, 33, 4, 44};
-  CHECK(check_tile<int32_t>(&tile3, c_data3));
+  CHECK(check_tile<int32_t>(tile3.fixed_tile(), c_data3));
 
   // Clean up
   close_array();
@@ -1965,77 +2345,137 @@ TEST_CASE_METHOD(
   // Create subarray
   open_array(array_name, TILEDB_READ);
   int32_t sub1[] = {3, 6};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1}, sizeof(sub1), &subarray1);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler1(&buffers, &subarray1, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile1_0_a1;
-  CHECK(tiler1.get_tile(0, "a1", &tile1_0_a1).ok());
+  WriterTile tile1_0_a1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(0, "a1", tile1_0_a1).ok());
   std::vector<int32_t> c_data1_0_a1 = {fill_value, fill_value, 1, 2, 3};
-  CHECK(check_tile<int32_t>(&tile1_0_a1, c_data1_0_a1));
-  Tile tile1_0_a2;
-  CHECK(tiler1.get_tile(0, "a2", &tile1_0_a2).ok());
+  CHECK(check_tile<int32_t>(tile1_0_a1.fixed_tile(), c_data1_0_a1));
+  WriterTile tile1_0_a2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(double),
+      Datatype::FLOAT64);
+  CHECK(tiler1.get_tile(0, "a2", tile1_0_a2).ok());
   std::vector<double> c_data1_0_a2 = {
       double(fill_value), double(fill_value), 1.1, 2.2, 3.3};
-  CHECK(check_tile<double>(&tile1_0_a2, c_data1_0_a2));
+  CHECK(check_tile<double>(tile1_0_a2.fixed_tile(), c_data1_0_a2));
 
   // Test get tile 1
-  Tile tile1_1_a1;
-  CHECK(tiler1.get_tile(1, "a1", &tile1_1_a1).ok());
+  WriterTile tile1_1_a1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(1, "a1", tile1_1_a1).ok());
   std::vector<int32_t> c_data1_1_a1 = {
       4, fill_value, fill_value, fill_value, fill_value};
-  CHECK(check_tile<int32_t>(&tile1_1_a1, c_data1_1_a1));
-  Tile tile1_1_a2;
-  CHECK(tiler1.get_tile(1, "a2", &tile1_1_a2).ok());
+  CHECK(check_tile<int32_t>(tile1_1_a1.fixed_tile(), c_data1_1_a1));
+  WriterTile tile1_1_a2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(double),
+      Datatype::FLOAT64);
+  CHECK(tiler1.get_tile(1, "a2", tile1_1_a2).ok());
   std::vector<double> c_data1_1_a2 = {4.4,
                                       double(fill_value),
                                       double(fill_value),
                                       double(fill_value),
                                       double(fill_value)};
-  CHECK(check_tile<double>(&tile1_1_a2, c_data1_1_a2));
+  CHECK(check_tile<double>(tile1_1_a2.fixed_tile(), c_data1_1_a2));
 
   // Create new subarray
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub2[] = {7, 10};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2}, sizeof(sub2), &subarray2);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler2(&buffers, &subarray2, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile2_a1;
-  CHECK(tiler2.get_tile(0, "a1", &tile2_a1).ok());
+  WriterTile tile2_a1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler2.get_tile(0, "a1", tile2_a1).ok());
   std::vector<int32_t> c_data2_a1 = {fill_value, 1, 2, 3, 4};
-  CHECK(check_tile<int32_t>(&tile2_a1, c_data2_a1));
-  Tile tile2_a2;
-  CHECK(tiler2.get_tile(0, "a2", &tile2_a2).ok());
+  CHECK(check_tile<int32_t>(tile2_a1.fixed_tile(), c_data2_a1));
+  WriterTile tile2_a2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(double),
+      Datatype::FLOAT64);
+  CHECK(tiler2.get_tile(0, "a2", tile2_a2).ok());
   std::vector<double> c_data2_a2 = {double(fill_value), 1.1, 2.2, 3.3, 4.4};
-  CHECK(check_tile<double>(&tile2_a2, c_data2_a2));
+  CHECK(check_tile<double>(tile2_a2.fixed_tile(), c_data2_a2));
 
   // Create new subarray (col-major)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub3[] = {7, 10};
-  Subarray subarray3(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray3(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub3}, sizeof(sub3), &subarray3);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler3(&buffers, &subarray3, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile3_a1;
-  CHECK(tiler3.get_tile(0, "a1", &tile3_a1).ok());
+  WriterTile tile3_a1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(0, "a1", tile3_a1).ok());
   std::vector<int32_t> c_data3_a1 = {fill_value, 1, 2, 3, 4};
-  CHECK(check_tile<int32_t>(&tile3_a1, c_data3_a1));
-  Tile tile3_a2;
-  CHECK(tiler3.get_tile(0, "a2", &tile3_a2).ok());
+  CHECK(check_tile<int32_t>(tile3_a1.fixed_tile(), c_data3_a1));
+  WriterTile tile3_a2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      false,
+      sizeof(double),
+      Datatype::FLOAT64);
+  CHECK(tiler3.get_tile(0, "a2", tile3_a2).ok());
   std::vector<double> c_data3_a2 = {double(fill_value), 1.1, 2.2, 3.3, 4.4};
-  CHECK(check_tile<double>(&tile3_a2, c_data3_a2));
+  CHECK(check_tile<double>(tile3_a2.fixed_tile(), c_data3_a2));
 
   // Clean up
   close_array();
@@ -2078,15 +2518,25 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {4, 6};
   int32_t sub1_1[] = {18, 22};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler1(&buffers, &subarray1, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile1_0;
-  CHECK(tiler1.get_tile_null(0, "a", &tile1_0).ok());
+  WriterTile tile1_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      true,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(0, "a", tile1_0).ok());
   std::vector<uint8_t> c_data1_0(50);
   for (int i = 0; i <= 36; ++i)
     c_data1_0[i] = fill_value;
@@ -2098,11 +2548,17 @@ TEST_CASE_METHOD(
   c_data1_0[47] = 0;
   c_data1_0[48] = 1;
   c_data1_0[49] = 0;
-  CHECK(check_tile<uint8_t>(&tile1_0, c_data1_0));
+  CHECK(check_tile<uint8_t>(tile1_0.validity_tile(), c_data1_0));
 
   // Test get tile 1
-  Tile tile1_1;
-  CHECK(tiler1.get_tile_null(1, "a", &tile1_1).ok());
+  WriterTile tile1_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      true,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(1, "a", tile1_1).ok());
   std::vector<uint8_t> c_data1_1(50);
   for (int i = 0; i <= 29; ++i)
     c_data1_1[i] = fill_value;
@@ -2114,11 +2570,17 @@ TEST_CASE_METHOD(
   c_data1_1[41] = 1;
   for (int i = 42; i <= 49; ++i)
     c_data1_1[i] = fill_value;
-  CHECK(check_tile<uint8_t>(&tile1_1, c_data1_1));
+  CHECK(check_tile<uint8_t>(tile1_1.validity_tile(), c_data1_1));
 
   // Test get tile 2
-  Tile tile1_2;
-  CHECK(tiler1.get_tile_null(2, "a", &tile1_2).ok());
+  WriterTile tile1_2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      true,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(2, "a", tile1_2).ok());
   std::vector<uint8_t> c_data1_2(50);
   for (int i = 0; i <= 6; ++i)
     c_data1_2[i] = fill_value;
@@ -2127,24 +2589,34 @@ TEST_CASE_METHOD(
   c_data1_2[9] = 0;
   for (int i = 10; i <= 49; ++i)
     c_data1_2[i] = fill_value;
-  CHECK(check_tile<uint8_t>(&tile1_2, c_data1_2));
+  CHECK(check_tile<uint8_t>(tile1_2.validity_tile(), c_data1_2));
 
   // Test get tile 3
-  Tile tile1_3;
-  CHECK(tiler1.get_tile_null(3, "a", &tile1_3).ok());
+  WriterTile tile1_3(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      true,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(3, "a", tile1_3).ok());
   std::vector<uint8_t> c_data1_3(50);
   c_data1_3[0] = 0;
   c_data1_3[1] = 1;
   for (int i = 2; i <= 49; ++i)
     c_data1_3[i] = fill_value;
-  CHECK(check_tile<uint8_t>(&tile1_3, c_data1_3));
+  CHECK(check_tile<uint8_t>(tile1_3.validity_tile(), c_data1_3));
 
   // Create subarray (single tile)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub2_0[] = {3, 5};
   int32_t sub2_1[] = {13, 18};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2_0, sub2_1}, sizeof(sub2_0), &subarray2);
 
   // Create DenseTiler
@@ -2161,8 +2633,14 @@ TEST_CASE_METHOD(
   DenseTiler<int32_t> tiler2(&buffers, &subarray2, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile2_0;
-  CHECK(tiler2.get_tile_null(0, "a", &tile2_0).ok());
+  WriterTile tile2_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      true,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler2.get_tile(0, "a", tile2_0).ok());
   std::vector<uint8_t> c_data2_0(50);
   for (int i = 0; i <= 21; ++i)
     c_data2_0[i] = fill_value;
@@ -2190,14 +2668,18 @@ TEST_CASE_METHOD(
   c_data2_0[47] = 0;
   for (int i = 48; i <= 49; ++i)
     c_data2_0[i] = fill_value;
-  CHECK(check_tile<uint8_t>(&tile2_0, c_data2_0));
+  CHECK(check_tile<uint8_t>(tile2_0.validity_tile(), c_data2_0));
 
   // Create subarray (multiple tiles, col-major)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub3_0[] = {4, 6};
   int32_t sub3_1[] = {18, 22};
-  Subarray subarray3(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray3(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub3_0, sub3_1}, sizeof(sub3_0), &subarray3);
 
   // Create DenseTiler
@@ -2214,8 +2696,14 @@ TEST_CASE_METHOD(
   DenseTiler<int32_t> tiler3(&buffers, &subarray3, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile3_0;
-  CHECK(tiler3.get_tile_null(0, "a", &tile3_0).ok());
+  WriterTile tile3_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      true,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(0, "a", tile3_0).ok());
   std::vector<uint8_t> c_data3_0(50);
   for (int i = 0; i <= 36; ++i)
     c_data3_0[i] = fill_value;
@@ -2227,11 +2715,17 @@ TEST_CASE_METHOD(
   c_data3_0[47] = 1;
   c_data3_0[48] = 0;
   c_data3_0[49] = 0;
-  CHECK(check_tile<uint8_t>(&tile3_0, c_data3_0));
+  CHECK(check_tile<uint8_t>(tile3_0.validity_tile(), c_data3_0));
 
   // Test get tile 1
-  Tile tile3_1;
-  CHECK(tiler3.get_tile_null(1, "a", &tile3_1).ok());
+  WriterTile tile3_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      true,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(1, "a", tile3_1).ok());
   std::vector<uint8_t> c_data3_1(50);
   for (int i = 0; i <= 29; ++i)
     c_data3_1[i] = fill_value;
@@ -2243,11 +2737,17 @@ TEST_CASE_METHOD(
   c_data3_1[41] = 0;
   for (int i = 42; i <= 49; ++i)
     c_data3_1[i] = fill_value;
-  CHECK(check_tile<uint8_t>(&tile3_1, c_data3_1));
+  CHECK(check_tile<uint8_t>(tile3_1.validity_tile(), c_data3_1));
 
   // Test get tile 2
-  Tile tile3_2;
-  CHECK(tiler3.get_tile_null(2, "a", &tile3_2).ok());
+  WriterTile tile3_2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      true,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(2, "a", tile3_2).ok());
   std::vector<uint8_t> c_data3_2(50);
   for (int i = 0; i <= 6; ++i)
     c_data3_2[i] = fill_value;
@@ -2256,24 +2756,34 @@ TEST_CASE_METHOD(
   c_data3_2[9] = 1;
   for (int i = 10; i <= 49; ++i)
     c_data3_2[i] = fill_value;
-  CHECK(check_tile<uint8_t>(&tile3_2, c_data3_2));
+  CHECK(check_tile<uint8_t>(tile3_2.validity_tile(), c_data3_2));
 
   // Test get tile 3
-  Tile tile3_3;
-  CHECK(tiler3.get_tile_null(3, "a", &tile3_3).ok());
+  WriterTile tile3_3(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      true,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler3.get_tile(3, "a", tile3_3).ok());
   std::vector<uint8_t> c_data3_3(50);
   c_data3_3[0] = 1;
   c_data3_3[1] = 1;
   for (int i = 2; i <= 49; ++i)
     c_data3_3[i] = fill_value;
-  CHECK(check_tile<uint8_t>(&tile3_3, c_data3_3));
+  CHECK(check_tile<uint8_t>(tile3_3.validity_tile(), c_data3_3));
 
   // Create subarray (single tile, col-major)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub4_0[] = {3, 5};
   int32_t sub4_1[] = {13, 18};
-  Subarray subarray4(array_->array_, Layout::COL_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray4(
+      array_->array_.get(),
+      Layout::COL_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub4_0, sub4_1}, sizeof(sub4_0), &subarray4);
 
   // Create DenseTiler
@@ -2290,8 +2800,14 @@ TEST_CASE_METHOD(
   DenseTiler<int32_t> tiler4(&buffers, &subarray4, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile4_0;
-  CHECK(tiler4.get_tile_null(0, "a", &tile4_0).ok());
+  WriterTile tile4_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      false,
+      true,
+      sizeof(int32_t),
+      Datatype::INT32);
+  CHECK(tiler4.get_tile(0, "a", tile4_0).ok());
   std::vector<uint8_t> c_data4_0(50);
   for (int i = 0; i <= 21; ++i)
     c_data4_0[i] = fill_value;
@@ -2319,7 +2835,7 @@ TEST_CASE_METHOD(
   c_data4_0[47] = 0;
   for (int i = 48; i <= 49; ++i)
     c_data4_0[i] = fill_value;
-  CHECK(check_tile<uint8_t>(&tile4_0, c_data4_0));
+  CHECK(check_tile<uint8_t>(tile4_0.validity_tile(), c_data4_0));
 
   // Clean up
   close_array();
@@ -2361,15 +2877,25 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {4, 6};
   int32_t sub1_1[] = {18, 22};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler1(&buffers, &subarray1, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile1_0_off, tile1_0_val;
-  CHECK(tiler1.get_tile_var(0, "a", &tile1_0_off, &tile1_0_val).ok());
+  WriterTile tile1_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::STRING_ASCII);
+  CHECK(tiler1.get_tile(0, "a", tile1_0).ok());
   std::vector<uint64_t> c_data1_0_off(50);
   for (int i = 0; i <= 37; ++i)
     c_data1_0_off[i] = i;
@@ -2381,7 +2907,7 @@ TEST_CASE_METHOD(
   c_data1_0_off[47] = c_data1_0_off[46] + 1;
   c_data1_0_off[48] = c_data1_0_off[47] + std::string("f").size();
   c_data1_0_off[49] = c_data1_0_off[48] + std::string("gg").size();
-  CHECK(check_tile<uint64_t>(&tile1_0_off, c_data1_0_off));
+  CHECK(check_tile<uint64_t>(tile1_0.offset_tile(), c_data1_0_off));
   std::vector<uint8_t> c_data1_0_val(56);
   for (int i = 0; i <= 36; ++i)
     c_data1_0_val[i] = 0;
@@ -2399,11 +2925,17 @@ TEST_CASE_METHOD(
   c_data1_0_val[53] = 'h';
   c_data1_0_val[54] = 'h';
   c_data1_0_val[55] = 'h';
-  CHECK(check_tile<uint8_t>(&tile1_0_val, c_data1_0_val));
+  CHECK(check_tile<uint8_t>(tile1_0.var_tile(), c_data1_0_val));
 
   // Test get tile 1
-  Tile tile1_1_off, tile1_1_val;
-  CHECK(tiler1.get_tile_var(1, "a", &tile1_1_off, &tile1_1_val).ok());
+  WriterTile tile1_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::STRING_ASCII);
+  CHECK(tiler1.get_tile(1, "a", tile1_1).ok());
   std::vector<uint64_t> c_data1_1_off(50);
   for (int i = 0; i <= 30; ++i)
     c_data1_1_off[i] = i;
@@ -2415,7 +2947,7 @@ TEST_CASE_METHOD(
   c_data1_1_off[42] = c_data1_1_off[41] + std::string("ooooo").size();
   for (int i = 43; i <= 49; ++i)
     c_data1_1_off[i] = c_data1_1_off[i - 1] + 1;
-  CHECK(check_tile<uint64_t>(&tile1_1_off, c_data1_1_off));
+  CHECK(check_tile<uint64_t>(tile1_1.offset_tile(), c_data1_1_off));
   std::vector<uint8_t> c_data1_1_val(64);
   for (int i = 0; i <= 29; ++i)
     c_data1_1_val[i] = 0;
@@ -2441,11 +2973,17 @@ TEST_CASE_METHOD(
   c_data1_1_val[55] = 'j';
   for (int i = 56; i <= 63; ++i)
     c_data1_1_val[i] = 0;
-  CHECK(check_tile<uint8_t>(&tile1_1_val, c_data1_1_val));
+  CHECK(check_tile<uint8_t>(tile1_1.var_tile(), c_data1_1_val));
 
   // Test get tile 2
-  Tile tile1_2_off, tile1_2_val;
-  CHECK(tiler1.get_tile_var(2, "a", &tile1_2_off, &tile1_2_val).ok());
+  WriterTile tile1_2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::STRING_ASCII);
+  CHECK(tiler1.get_tile(2, "a", tile1_2).ok());
   std::vector<uint64_t> c_data1_2_off(50);
   for (int i = 0; i <= 7; ++i)
     c_data1_2_off[i] = i;
@@ -2454,7 +2992,7 @@ TEST_CASE_METHOD(
   c_data1_2_off[10] = c_data1_2_off[9] + std::string("mmm").size();
   for (int i = 11; i <= 49; ++i)
     c_data1_2_off[i] = c_data1_2_off[i - 1] + 1;
-  CHECK(check_tile<uint64_t>(&tile1_2_off, c_data1_2_off));
+  CHECK(check_tile<uint64_t>(tile1_2.offset_tile(), c_data1_2_off));
   std::vector<uint8_t> c_data1_2_val(53);
   for (int i = 0; i <= 6; ++i)
     c_data1_2_val[i] = 0;
@@ -2466,18 +3004,24 @@ TEST_CASE_METHOD(
   c_data1_2_val[12] = 'm';
   for (int i = 13; i <= 52; ++i)
     c_data1_2_val[i] = 0;
-  CHECK(check_tile<uint8_t>(&tile1_2_val, c_data1_2_val));
+  CHECK(check_tile<uint8_t>(tile1_2.var_tile(), c_data1_2_val));
 
   // Test get tile 3
-  Tile tile1_3_off, tile1_3_val;
-  CHECK(tiler1.get_tile_var(3, "a", &tile1_3_off, &tile1_3_val).ok());
+  WriterTile tile1_3(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::STRING_ASCII);
+  CHECK(tiler1.get_tile(3, "a", tile1_3).ok());
   std::vector<uint64_t> c_data1_3_off(50);
   c_data1_3_off[0] = 0;
   c_data1_3_off[1] = 4;
   c_data1_3_off[2] = 9;
   for (int i = 3; i <= 49; ++i)
     c_data1_3_off[i] = c_data1_3_off[i - 1] + 1;
-  CHECK(check_tile<uint64_t>(&tile1_3_off, c_data1_3_off));
+  CHECK(check_tile<uint64_t>(tile1_3.offset_tile(), c_data1_3_off));
   std::vector<uint8_t> c_data1_3_val(57);
   c_data1_3_val[0] = 'n';
   c_data1_3_val[1] = 'n';
@@ -2490,14 +3034,18 @@ TEST_CASE_METHOD(
   c_data1_3_val[8] = 'o';
   for (int i = 9; i < 57; ++i)
     c_data1_3_val[i] = 0;
-  CHECK(check_tile<uint8_t>(&tile1_3_val, c_data1_3_val));
+  CHECK(check_tile<uint8_t>(tile1_3.var_tile(), c_data1_3_val));
 
   // Create subarray (single tile)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub2_0[] = {3, 5};
   int32_t sub2_1[] = {13, 18};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2_0, sub2_1}, sizeof(sub2_0), &subarray2);
 
   // Create DenseTiler
@@ -2512,8 +3060,14 @@ TEST_CASE_METHOD(
   DenseTiler<int32_t> tiler2(&buffers, &subarray2, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile2_0_off, tile2_0_val;
-  CHECK(tiler2.get_tile_var(0, "a", &tile2_0_off, &tile2_0_val).ok());
+  WriterTile tile2_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::STRING_ASCII);
+  CHECK(tiler2.get_tile(0, "a", tile2_0).ok());
   std::vector<uint64_t> c_data2_0_off(50);
   for (int i = 0; i <= 22; ++i)
     c_data2_0_off[i] = i;
@@ -2540,7 +3094,7 @@ TEST_CASE_METHOD(
   c_data2_0_off[47] = c_data2_0_off[46] + std::string("qq").size();
   c_data2_0_off[48] = c_data2_0_off[47] + std::string("r").size();
   c_data2_0_off[49] = c_data2_0_off[48] + 1;
-  CHECK(check_tile<uint64_t>(&tile2_0_off, c_data2_0_off));
+  CHECK(check_tile<uint64_t>(tile2_0.offset_tile(), c_data2_0_off));
   std::vector<uint8_t> c_data2_0_val(81);
   for (int i = 0; i <= 21; ++i)
     c_data2_0_val[i] = 0;
@@ -2599,7 +3153,7 @@ TEST_CASE_METHOD(
   c_data2_0_val[78] = 'r';
   for (int i = 79; i <= 80; ++i)
     c_data2_0_val[i] = 0;
-  CHECK(check_tile<uint8_t>(&tile2_0_val, c_data2_0_val));
+  CHECK(check_tile<uint8_t>(tile2_0.var_tile(), c_data2_0_val));
 
   // Clean up
   close_array();
@@ -2657,15 +3211,25 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {4, 6};
   int32_t sub1_1[] = {18, 22};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
   DenseTiler<int32_t> tiler1(&buffers, &subarray1, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile1_0_off, tile1_0_val;
-  CHECK(tiler1.get_tile_var(0, "a", &tile1_0_off, &tile1_0_val).ok());
+  WriterTile tile1_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(0, "a", tile1_0).ok());
   std::vector<uint64_t> c_data1_0_off(50);
   for (int i = 0; i <= 37; ++i)
     c_data1_0_off[i] = i * sizeof(int32_t);
@@ -2677,7 +3241,7 @@ TEST_CASE_METHOD(
   c_data1_0_off[47] = c_data1_0_off[46] + sizeof(int32_t);
   c_data1_0_off[48] = c_data1_0_off[47] + sizeof(int32_t);
   c_data1_0_off[49] = c_data1_0_off[48] + 2 * sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_0_off, c_data1_0_off));
+  CHECK(check_tile<uint64_t>(tile1_0.offset_tile(), c_data1_0_off));
   std::vector<int32_t> c_data1_0_val(56);
   for (int i = 0; i <= 36; ++i)
     c_data1_0_val[i] = 0;
@@ -2695,11 +3259,17 @@ TEST_CASE_METHOD(
   c_data1_0_val[53] = 8;
   c_data1_0_val[54] = 8;
   c_data1_0_val[55] = 8;
-  CHECK(check_tile<int32_t>(&tile1_0_val, c_data1_0_val));
+  CHECK(check_tile<int32_t>(tile1_0.var_tile(), c_data1_0_val));
 
   // Test get tile 1
-  Tile tile1_1_off, tile1_1_val;
-  CHECK(tiler1.get_tile_var(1, "a", &tile1_1_off, &tile1_1_val).ok());
+  WriterTile tile1_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(1, "a", tile1_1).ok());
   std::vector<uint64_t> c_data1_1_off(50);
   for (int i = 0; i <= 30; ++i)
     c_data1_1_off[i] = i * sizeof(int32_t);
@@ -2711,7 +3281,7 @@ TEST_CASE_METHOD(
   c_data1_1_off[42] = c_data1_1_off[41] + 5 * sizeof(int32_t);
   for (int i = 43; i <= 49; ++i)
     c_data1_1_off[i] = c_data1_1_off[i - 1] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_1_off, c_data1_1_off));
+  CHECK(check_tile<uint64_t>(tile1_1.offset_tile(), c_data1_1_off));
   std::vector<int32_t> c_data1_1_val(64);
   for (int i = 0; i <= 29; ++i)
     c_data1_1_val[i] = 0;
@@ -2737,11 +3307,17 @@ TEST_CASE_METHOD(
   c_data1_1_val[55] = 10;
   for (int i = 56; i <= 63; ++i)
     c_data1_1_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile1_1_val, c_data1_1_val));
+  CHECK(check_tile<int32_t>(tile1_1.var_tile(), c_data1_1_val));
 
   // Test get tile 2
-  Tile tile1_2_off, tile1_2_val;
-  CHECK(tiler1.get_tile_var(2, "a", &tile1_2_off, &tile1_2_val).ok());
+  WriterTile tile1_2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(2, "a", tile1_2).ok());
   std::vector<uint64_t> c_data1_2_off(50);
   for (int i = 0; i <= 7; ++i)
     c_data1_2_off[i] = i * sizeof(int32_t);
@@ -2750,7 +3326,7 @@ TEST_CASE_METHOD(
   c_data1_2_off[10] = c_data1_2_off[9] + 3 * sizeof(int32_t);
   for (int i = 11; i <= 49; ++i)
     c_data1_2_off[i] = c_data1_2_off[i - 1] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_2_off, c_data1_2_off));
+  CHECK(check_tile<uint64_t>(tile1_2.offset_tile(), c_data1_2_off));
   std::vector<int32_t> c_data1_2_val(53);
   for (int i = 0; i <= 6; ++i)
     c_data1_2_val[i] = 0;
@@ -2762,18 +3338,24 @@ TEST_CASE_METHOD(
   c_data1_2_val[12] = 13;
   for (int i = 13; i <= 52; ++i)
     c_data1_2_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile1_2_val, c_data1_2_val));
+  CHECK(check_tile<int32_t>(tile1_2.var_tile(), c_data1_2_val));
 
   // Test get tile 3
-  Tile tile1_3_off, tile1_3_val;
-  CHECK(tiler1.get_tile_var(3, "a", &tile1_3_off, &tile1_3_val).ok());
+  WriterTile tile1_3(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(3, "a", tile1_3).ok());
   std::vector<uint64_t> c_data1_3_off(50);
   c_data1_3_off[0] = 0;
   c_data1_3_off[1] = 4 * sizeof(int32_t);
   c_data1_3_off[2] = 9 * sizeof(int32_t);
   for (int i = 3; i <= 49; ++i)
     c_data1_3_off[i] = c_data1_3_off[i - 1] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_3_off, c_data1_3_off));
+  CHECK(check_tile<uint64_t>(tile1_3.offset_tile(), c_data1_3_off));
   std::vector<int32_t> c_data1_3_val(57);
   c_data1_3_val[0] = 14;
   c_data1_3_val[1] = 14;
@@ -2786,14 +3368,18 @@ TEST_CASE_METHOD(
   c_data1_3_val[8] = 15;
   for (int i = 9; i < 57; ++i)
     c_data1_3_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile1_3_val, c_data1_3_val));
+  CHECK(check_tile<int32_t>(tile1_3.var_tile(), c_data1_3_val));
 
   // Create subarray (single tile)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub2_0[] = {3, 5};
   int32_t sub2_1[] = {13, 18};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2_0, sub2_1}, sizeof(sub2_0), &subarray2);
 
   // Create DenseTiler
@@ -2827,8 +3413,14 @@ TEST_CASE_METHOD(
   DenseTiler<int32_t> tiler2(&buffers, &subarray2, &test::g_helper_stats);
 
   // Test get tile 0
-  Tile tile2_0_off, tile2_0_val;
-  CHECK(tiler2.get_tile_var(0, "a", &tile2_0_off, &tile2_0_val).ok());
+  WriterTile tile2_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::STRING_ASCII);
+  CHECK(tiler2.get_tile(0, "a", tile2_0).ok());
   std::vector<uint64_t> c_data2_0_off(50);
   for (int i = 0; i <= 22; ++i)
     c_data2_0_off[i] = i * sizeof(int32_t);
@@ -2855,7 +3447,7 @@ TEST_CASE_METHOD(
   c_data2_0_off[47] = c_data2_0_off[46] + 2 * sizeof(int32_t);
   c_data2_0_off[48] = c_data2_0_off[47] + sizeof(int32_t);
   c_data2_0_off[49] = c_data2_0_off[48] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile2_0_off, c_data2_0_off));
+  CHECK(check_tile<uint64_t>(tile2_0.offset_tile(), c_data2_0_off));
   std::vector<int32_t> c_data2_0_val(81);
   for (int i = 0; i <= 21; ++i)
     c_data2_0_val[i] = 0;
@@ -2914,7 +3506,7 @@ TEST_CASE_METHOD(
   c_data2_0_val[78] = 18;
   for (int i = 79; i <= 80; ++i)
     c_data2_0_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile2_0_val, c_data2_0_val));
+  CHECK(check_tile<int32_t>(tile2_0.var_tile(), c_data2_0_val));
 
   // Clean up
   close_array();
@@ -2973,7 +3565,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {4, 6};
   int32_t sub1_1[] = {18, 22};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
@@ -2981,8 +3577,14 @@ TEST_CASE_METHOD(
       &buffers, &subarray1, &test::g_helper_stats, "bytes", 64, true);
 
   // Test get tile 0
-  Tile tile1_0_off, tile1_0_val;
-  CHECK(tiler1.get_tile_var(0, "a", &tile1_0_off, &tile1_0_val).ok());
+  WriterTile tile1_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(0, "a", tile1_0).ok());
   std::vector<uint64_t> c_data1_0_off(50);
   for (int i = 0; i <= 37; ++i)
     c_data1_0_off[i] = i * sizeof(int32_t);
@@ -2994,7 +3596,7 @@ TEST_CASE_METHOD(
   c_data1_0_off[47] = c_data1_0_off[46] + sizeof(int32_t);
   c_data1_0_off[48] = c_data1_0_off[47] + sizeof(int32_t);
   c_data1_0_off[49] = c_data1_0_off[48] + 2 * sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_0_off, c_data1_0_off));
+  CHECK(check_tile<uint64_t>(tile1_0.offset_tile(), c_data1_0_off));
   std::vector<int32_t> c_data1_0_val(56);
   for (int i = 0; i <= 36; ++i)
     c_data1_0_val[i] = 0;
@@ -3012,11 +3614,17 @@ TEST_CASE_METHOD(
   c_data1_0_val[53] = 8;
   c_data1_0_val[54] = 8;
   c_data1_0_val[55] = 8;
-  CHECK(check_tile<int32_t>(&tile1_0_val, c_data1_0_val));
+  CHECK(check_tile<int32_t>(tile1_0.var_tile(), c_data1_0_val));
 
   // Test get tile 1
-  Tile tile1_1_off, tile1_1_val;
-  CHECK(tiler1.get_tile_var(1, "a", &tile1_1_off, &tile1_1_val).ok());
+  WriterTile tile1_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(1, "a", tile1_1).ok());
   std::vector<uint64_t> c_data1_1_off(50);
   for (int i = 0; i <= 30; ++i)
     c_data1_1_off[i] = i * sizeof(int32_t);
@@ -3028,7 +3636,7 @@ TEST_CASE_METHOD(
   c_data1_1_off[42] = c_data1_1_off[41] + 5 * sizeof(int32_t);
   for (int i = 43; i <= 49; ++i)
     c_data1_1_off[i] = c_data1_1_off[i - 1] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_1_off, c_data1_1_off));
+  CHECK(check_tile<uint64_t>(tile1_1.offset_tile(), c_data1_1_off));
   std::vector<int32_t> c_data1_1_val(64);
   for (int i = 0; i <= 29; ++i)
     c_data1_1_val[i] = 0;
@@ -3054,11 +3662,17 @@ TEST_CASE_METHOD(
   c_data1_1_val[55] = 10;
   for (int i = 56; i <= 63; ++i)
     c_data1_1_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile1_1_val, c_data1_1_val));
+  CHECK(check_tile<int32_t>(tile1_1.var_tile(), c_data1_1_val));
 
   // Test get tile 2
-  Tile tile1_2_off, tile1_2_val;
-  CHECK(tiler1.get_tile_var(2, "a", &tile1_2_off, &tile1_2_val).ok());
+  WriterTile tile1_2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(2, "a", tile1_2).ok());
   std::vector<uint64_t> c_data1_2_off(50);
   for (int i = 0; i <= 7; ++i)
     c_data1_2_off[i] = i * sizeof(int32_t);
@@ -3067,7 +3681,7 @@ TEST_CASE_METHOD(
   c_data1_2_off[10] = c_data1_2_off[9] + 3 * sizeof(int32_t);
   for (int i = 11; i <= 49; ++i)
     c_data1_2_off[i] = c_data1_2_off[i - 1] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_2_off, c_data1_2_off));
+  CHECK(check_tile<uint64_t>(tile1_2.offset_tile(), c_data1_2_off));
   std::vector<int32_t> c_data1_2_val(53);
   for (int i = 0; i <= 6; ++i)
     c_data1_2_val[i] = 0;
@@ -3079,18 +3693,24 @@ TEST_CASE_METHOD(
   c_data1_2_val[12] = 13;
   for (int i = 13; i <= 52; ++i)
     c_data1_2_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile1_2_val, c_data1_2_val));
+  CHECK(check_tile<int32_t>(tile1_2.var_tile(), c_data1_2_val));
 
   // Test get tile 3
-  Tile tile1_3_off, tile1_3_val;
-  CHECK(tiler1.get_tile_var(3, "a", &tile1_3_off, &tile1_3_val).ok());
+  WriterTile tile1_3(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(3, "a", tile1_3).ok());
   std::vector<uint64_t> c_data1_3_off(50);
   c_data1_3_off[0] = 0;
   c_data1_3_off[1] = 4 * sizeof(int32_t);
   c_data1_3_off[2] = 9 * sizeof(int32_t);
   for (int i = 3; i <= 49; ++i)
     c_data1_3_off[i] = c_data1_3_off[i - 1] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_3_off, c_data1_3_off));
+  CHECK(check_tile<uint64_t>(tile1_3.offset_tile(), c_data1_3_off));
   std::vector<int32_t> c_data1_3_val(57);
   c_data1_3_val[0] = 14;
   c_data1_3_val[1] = 14;
@@ -3103,14 +3723,18 @@ TEST_CASE_METHOD(
   c_data1_3_val[8] = 15;
   for (int i = 9; i < 57; ++i)
     c_data1_3_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile1_3_val, c_data1_3_val));
+  CHECK(check_tile<int32_t>(tile1_3.var_tile(), c_data1_3_val));
 
   // Create subarray (single tile)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub2_0[] = {3, 5};
   int32_t sub2_1[] = {13, 18};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2_0, sub2_1}, sizeof(sub2_0), &subarray2);
 
   // Create DenseTiler
@@ -3146,8 +3770,14 @@ TEST_CASE_METHOD(
       &buffers, &subarray2, &test::g_helper_stats, "bytes", 64, true);
 
   // Test get tile 0
-  Tile tile2_0_off, tile2_0_val;
-  CHECK(tiler2.get_tile_var(0, "a", &tile2_0_off, &tile2_0_val).ok());
+  WriterTile tile2_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler2.get_tile(0, "a", tile2_0).ok());
   std::vector<uint64_t> c_data2_0_off(50);
   for (int i = 0; i <= 22; ++i)
     c_data2_0_off[i] = i * sizeof(int32_t);
@@ -3174,7 +3804,7 @@ TEST_CASE_METHOD(
   c_data2_0_off[47] = c_data2_0_off[46] + 2 * sizeof(int32_t);
   c_data2_0_off[48] = c_data2_0_off[47] + sizeof(int32_t);
   c_data2_0_off[49] = c_data2_0_off[48] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile2_0_off, c_data2_0_off));
+  CHECK(check_tile<uint64_t>(tile2_0.offset_tile(), c_data2_0_off));
   std::vector<int32_t> c_data2_0_val(81);
   for (int i = 0; i <= 21; ++i)
     c_data2_0_val[i] = 0;
@@ -3233,7 +3863,7 @@ TEST_CASE_METHOD(
   c_data2_0_val[78] = 18;
   for (int i = 79; i <= 80; ++i)
     c_data2_0_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile2_0_val, c_data2_0_val));
+  CHECK(check_tile<int32_t>(tile2_0.var_tile(), c_data2_0_val));
 
   // Clean up
   close_array();
@@ -3278,7 +3908,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {4, 6};
   int32_t sub1_1[] = {18, 22};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
@@ -3286,8 +3920,14 @@ TEST_CASE_METHOD(
       &buffers, &subarray1, &test::g_helper_stats, "elements", 64, false);
 
   // Test get tile 0
-  Tile tile1_0_off, tile1_0_val;
-  CHECK(tiler1.get_tile_var(0, "a", &tile1_0_off, &tile1_0_val).ok());
+  WriterTile tile1_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(0, "a", tile1_0).ok());
   std::vector<uint64_t> c_data1_0_off(50);
   for (int i = 0; i <= 37; ++i)
     c_data1_0_off[i] = i * sizeof(int32_t);
@@ -3299,7 +3939,7 @@ TEST_CASE_METHOD(
   c_data1_0_off[47] = c_data1_0_off[46] + sizeof(int32_t);
   c_data1_0_off[48] = c_data1_0_off[47] + sizeof(int32_t);
   c_data1_0_off[49] = c_data1_0_off[48] + 2 * sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_0_off, c_data1_0_off));
+  CHECK(check_tile<uint64_t>(tile1_0.offset_tile(), c_data1_0_off));
   std::vector<int32_t> c_data1_0_val(56);
   for (int i = 0; i <= 36; ++i)
     c_data1_0_val[i] = 0;
@@ -3317,11 +3957,17 @@ TEST_CASE_METHOD(
   c_data1_0_val[53] = 8;
   c_data1_0_val[54] = 8;
   c_data1_0_val[55] = 8;
-  CHECK(check_tile<int32_t>(&tile1_0_val, c_data1_0_val));
+  CHECK(check_tile<int32_t>(tile1_0.var_tile(), c_data1_0_val));
 
   // Test get tile 1
-  Tile tile1_1_off, tile1_1_val;
-  CHECK(tiler1.get_tile_var(1, "a", &tile1_1_off, &tile1_1_val).ok());
+  WriterTile tile1_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(1, "a", tile1_1).ok());
   std::vector<uint64_t> c_data1_1_off(50);
   for (int i = 0; i <= 30; ++i)
     c_data1_1_off[i] = i * sizeof(int32_t);
@@ -3333,7 +3979,7 @@ TEST_CASE_METHOD(
   c_data1_1_off[42] = c_data1_1_off[41] + 5 * sizeof(int32_t);
   for (int i = 43; i <= 49; ++i)
     c_data1_1_off[i] = c_data1_1_off[i - 1] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_1_off, c_data1_1_off));
+  CHECK(check_tile<uint64_t>(tile1_1.offset_tile(), c_data1_1_off));
   std::vector<int32_t> c_data1_1_val(64);
   for (int i = 0; i <= 29; ++i)
     c_data1_1_val[i] = 0;
@@ -3359,11 +4005,17 @@ TEST_CASE_METHOD(
   c_data1_1_val[55] = 10;
   for (int i = 56; i <= 63; ++i)
     c_data1_1_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile1_1_val, c_data1_1_val));
+  CHECK(check_tile<int32_t>(tile1_1.var_tile(), c_data1_1_val));
 
   // Test get tile 2
-  Tile tile1_2_off, tile1_2_val;
-  CHECK(tiler1.get_tile_var(2, "a", &tile1_2_off, &tile1_2_val).ok());
+  WriterTile tile1_2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(2, "a", tile1_2).ok());
   std::vector<uint64_t> c_data1_2_off(50);
   for (int i = 0; i <= 7; ++i)
     c_data1_2_off[i] = i * sizeof(int32_t);
@@ -3372,7 +4024,7 @@ TEST_CASE_METHOD(
   c_data1_2_off[10] = c_data1_2_off[9] + 3 * sizeof(int32_t);
   for (int i = 11; i <= 49; ++i)
     c_data1_2_off[i] = c_data1_2_off[i - 1] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_2_off, c_data1_2_off));
+  CHECK(check_tile<uint64_t>(tile1_2.offset_tile(), c_data1_2_off));
   std::vector<int32_t> c_data1_2_val(53);
   for (int i = 0; i <= 6; ++i)
     c_data1_2_val[i] = 0;
@@ -3384,18 +4036,24 @@ TEST_CASE_METHOD(
   c_data1_2_val[12] = 13;
   for (int i = 13; i <= 52; ++i)
     c_data1_2_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile1_2_val, c_data1_2_val));
+  CHECK(check_tile<int32_t>(tile1_2.var_tile(), c_data1_2_val));
 
   // Test get tile 3
-  Tile tile1_3_off, tile1_3_val;
-  CHECK(tiler1.get_tile_var(3, "a", &tile1_3_off, &tile1_3_val).ok());
+  WriterTile tile1_3(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(3, "a", tile1_3).ok());
   std::vector<uint64_t> c_data1_3_off(50);
   c_data1_3_off[0] = 0;
   c_data1_3_off[1] = 4 * sizeof(int32_t);
   c_data1_3_off[2] = 9 * sizeof(int32_t);
   for (int i = 3; i <= 49; ++i)
     c_data1_3_off[i] = c_data1_3_off[i - 1] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_3_off, c_data1_3_off));
+  CHECK(check_tile<uint64_t>(tile1_3.offset_tile(), c_data1_3_off));
   std::vector<int32_t> c_data1_3_val(57);
   c_data1_3_val[0] = 14;
   c_data1_3_val[1] = 14;
@@ -3408,14 +4066,18 @@ TEST_CASE_METHOD(
   c_data1_3_val[8] = 15;
   for (int i = 9; i < 57; ++i)
     c_data1_3_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile1_3_val, c_data1_3_val));
+  CHECK(check_tile<int32_t>(tile1_3.var_tile(), c_data1_3_val));
 
   // Create subarray (single tile)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub2_0[] = {3, 5};
   int32_t sub2_1[] = {13, 18};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2_0, sub2_1}, sizeof(sub2_0), &subarray2);
 
   // Create DenseTiler
@@ -3434,8 +4096,14 @@ TEST_CASE_METHOD(
       &buffers, &subarray2, &test::g_helper_stats, "elements", 64, false);
 
   // Test get tile 0
-  Tile tile2_0_off, tile2_0_val;
-  CHECK(tiler2.get_tile_var(0, "a", &tile2_0_off, &tile2_0_val).ok());
+  WriterTile tile2_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler2.get_tile(0, "a", tile2_0).ok());
   std::vector<uint64_t> c_data2_0_off(50);
   for (int i = 0; i <= 22; ++i)
     c_data2_0_off[i] = i * sizeof(int32_t);
@@ -3462,7 +4130,7 @@ TEST_CASE_METHOD(
   c_data2_0_off[47] = c_data2_0_off[46] + 2 * sizeof(int32_t);
   c_data2_0_off[48] = c_data2_0_off[47] + sizeof(int32_t);
   c_data2_0_off[49] = c_data2_0_off[48] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile2_0_off, c_data2_0_off));
+  CHECK(check_tile<uint64_t>(tile2_0.offset_tile(), c_data2_0_off));
   std::vector<int32_t> c_data2_0_val(81);
   for (int i = 0; i <= 21; ++i)
     c_data2_0_val[i] = 0;
@@ -3521,7 +4189,7 @@ TEST_CASE_METHOD(
   c_data2_0_val[78] = 18;
   for (int i = 79; i <= 80; ++i)
     c_data2_0_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile2_0_val, c_data2_0_val));
+  CHECK(check_tile<int32_t>(tile2_0.var_tile(), c_data2_0_val));
 
   // Clean up
   close_array();
@@ -3566,7 +4234,11 @@ TEST_CASE_METHOD(
   open_array(array_name, TILEDB_READ);
   int32_t sub1_0[] = {4, 6};
   int32_t sub1_1[] = {18, 22};
-  Subarray subarray1(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray1(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub1_0, sub1_1}, sizeof(sub1_0), &subarray1);
 
   // Create DenseTiler
@@ -3574,8 +4246,14 @@ TEST_CASE_METHOD(
       &buffers, &subarray1, &test::g_helper_stats, "elements", 32, false);
 
   // Test get tile 0
-  Tile tile1_0_off, tile1_0_val;
-  CHECK(tiler1.get_tile_var(0, "a", &tile1_0_off, &tile1_0_val).ok());
+  WriterTile tile1_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(0, "a", tile1_0).ok());
   std::vector<uint64_t> c_data1_0_off(50);
   for (int i = 0; i <= 37; ++i)
     c_data1_0_off[i] = i * sizeof(int32_t);
@@ -3587,7 +4265,7 @@ TEST_CASE_METHOD(
   c_data1_0_off[47] = c_data1_0_off[46] + sizeof(int32_t);
   c_data1_0_off[48] = c_data1_0_off[47] + sizeof(int32_t);
   c_data1_0_off[49] = c_data1_0_off[48] + 2 * sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_0_off, c_data1_0_off));
+  CHECK(check_tile<uint64_t>(tile1_0.offset_tile(), c_data1_0_off));
   std::vector<int32_t> c_data1_0_val(56);
   for (int i = 0; i <= 36; ++i)
     c_data1_0_val[i] = 0;
@@ -3605,11 +4283,17 @@ TEST_CASE_METHOD(
   c_data1_0_val[53] = 8;
   c_data1_0_val[54] = 8;
   c_data1_0_val[55] = 8;
-  CHECK(check_tile<int32_t>(&tile1_0_val, c_data1_0_val));
+  CHECK(check_tile<int32_t>(tile1_0.var_tile(), c_data1_0_val));
 
   // Test get tile 1
-  Tile tile1_1_off, tile1_1_val;
-  CHECK(tiler1.get_tile_var(1, "a", &tile1_1_off, &tile1_1_val).ok());
+  WriterTile tile1_1(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(1, "a", tile1_1).ok());
   std::vector<uint64_t> c_data1_1_off(50);
   for (int i = 0; i <= 30; ++i)
     c_data1_1_off[i] = i * sizeof(int32_t);
@@ -3621,7 +4305,7 @@ TEST_CASE_METHOD(
   c_data1_1_off[42] = c_data1_1_off[41] + 5 * sizeof(int32_t);
   for (int i = 43; i <= 49; ++i)
     c_data1_1_off[i] = c_data1_1_off[i - 1] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_1_off, c_data1_1_off));
+  CHECK(check_tile<uint64_t>(tile1_1.offset_tile(), c_data1_1_off));
   std::vector<int32_t> c_data1_1_val(64);
   for (int i = 0; i <= 29; ++i)
     c_data1_1_val[i] = 0;
@@ -3647,11 +4331,17 @@ TEST_CASE_METHOD(
   c_data1_1_val[55] = 10;
   for (int i = 56; i <= 63; ++i)
     c_data1_1_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile1_1_val, c_data1_1_val));
+  CHECK(check_tile<int32_t>(tile1_1.var_tile(), c_data1_1_val));
 
   // Test get tile 2
-  Tile tile1_2_off, tile1_2_val;
-  CHECK(tiler1.get_tile_var(2, "a", &tile1_2_off, &tile1_2_val).ok());
+  WriterTile tile1_2(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(2, "a", tile1_2).ok());
   std::vector<uint64_t> c_data1_2_off(50);
   for (int i = 0; i <= 7; ++i)
     c_data1_2_off[i] = i * sizeof(int32_t);
@@ -3660,7 +4350,7 @@ TEST_CASE_METHOD(
   c_data1_2_off[10] = c_data1_2_off[9] + 3 * sizeof(int32_t);
   for (int i = 11; i <= 49; ++i)
     c_data1_2_off[i] = c_data1_2_off[i - 1] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_2_off, c_data1_2_off));
+  CHECK(check_tile<uint64_t>(tile1_2.offset_tile(), c_data1_2_off));
   std::vector<int32_t> c_data1_2_val(53);
   for (int i = 0; i <= 6; ++i)
     c_data1_2_val[i] = 0;
@@ -3672,18 +4362,24 @@ TEST_CASE_METHOD(
   c_data1_2_val[12] = 13;
   for (int i = 13; i <= 52; ++i)
     c_data1_2_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile1_2_val, c_data1_2_val));
+  CHECK(check_tile<int32_t>(tile1_2.var_tile(), c_data1_2_val));
 
   // Test get tile 3
-  Tile tile1_3_off, tile1_3_val;
-  CHECK(tiler1.get_tile_var(3, "a", &tile1_3_off, &tile1_3_val).ok());
+  WriterTile tile1_3(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler1.get_tile(3, "a", tile1_3).ok());
   std::vector<uint64_t> c_data1_3_off(50);
   c_data1_3_off[0] = 0;
   c_data1_3_off[1] = 4 * sizeof(int32_t);
   c_data1_3_off[2] = 9 * sizeof(int32_t);
   for (int i = 3; i <= 49; ++i)
     c_data1_3_off[i] = c_data1_3_off[i - 1] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile1_3_off, c_data1_3_off));
+  CHECK(check_tile<uint64_t>(tile1_3.offset_tile(), c_data1_3_off));
   std::vector<int32_t> c_data1_3_val(57);
   c_data1_3_val[0] = 14;
   c_data1_3_val[1] = 14;
@@ -3696,14 +4392,18 @@ TEST_CASE_METHOD(
   c_data1_3_val[8] = 15;
   for (int i = 9; i < 57; ++i)
     c_data1_3_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile1_3_val, c_data1_3_val));
+  CHECK(check_tile<int32_t>(tile1_3.var_tile(), c_data1_3_val));
 
   // Create subarray (single tile)
   close_array();
   open_array(array_name, TILEDB_READ);
   int32_t sub2_0[] = {3, 5};
   int32_t sub2_1[] = {13, 18};
-  Subarray subarray2(array_->array_, Layout::ROW_MAJOR, &test::g_helper_stats);
+  tiledb::sm::Subarray subarray2(
+      array_->array_.get(),
+      Layout::ROW_MAJOR,
+      &test::g_helper_stats,
+      test::g_helper_logger());
   add_ranges({sub2_0, sub2_1}, sizeof(sub2_0), &subarray2);
 
   // Create DenseTiler
@@ -3722,8 +4422,14 @@ TEST_CASE_METHOD(
       &buffers, &subarray2, &test::g_helper_stats, "elements", 32, false);
 
   // Test get tile 0
-  Tile tile2_0_off, tile2_0_val;
-  CHECK(tiler2.get_tile_var(0, "a", &tile2_0_off, &tile2_0_val).ok());
+  WriterTile tile2_0(
+      array_->array_->array_schema_latest(),
+      array_->array_->array_schema_latest().domain().cell_num_per_tile(),
+      true,
+      false,
+      1,
+      Datatype::INT32);
+  CHECK(tiler2.get_tile(0, "a", tile2_0).ok());
   std::vector<uint64_t> c_data2_0_off(50);
   for (int i = 0; i <= 22; ++i)
     c_data2_0_off[i] = i * sizeof(int32_t);
@@ -3750,7 +4456,7 @@ TEST_CASE_METHOD(
   c_data2_0_off[47] = c_data2_0_off[46] + 2 * sizeof(int32_t);
   c_data2_0_off[48] = c_data2_0_off[47] + sizeof(int32_t);
   c_data2_0_off[49] = c_data2_0_off[48] + sizeof(int32_t);
-  CHECK(check_tile<uint64_t>(&tile2_0_off, c_data2_0_off));
+  CHECK(check_tile<uint64_t>(tile2_0.offset_tile(), c_data2_0_off));
   std::vector<int32_t> c_data2_0_val(81);
   for (int i = 0; i <= 21; ++i)
     c_data2_0_val[i] = 0;
@@ -3809,11 +4515,9 @@ TEST_CASE_METHOD(
   c_data2_0_val[78] = 18;
   for (int i = 79; i <= 80; ++i)
     c_data2_0_val[i] = 0;
-  CHECK(check_tile<int32_t>(&tile2_0_val, c_data2_0_val));
+  CHECK(check_tile<int32_t>(tile2_0.var_tile(), c_data2_0_val));
 
   // Clean up
   close_array();
   remove_array(array_name);
 }
-
-// TODO: add stats

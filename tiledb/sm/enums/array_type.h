@@ -69,9 +69,18 @@ inline Status array_type_enum(
   else if (array_type_str == constants::sparse_str)
     *array_type_enum = ArrayType::SPARSE;
   else {
-    return Status::Error("Invalid ArrayType " + array_type_str);
+    return Status_Error("Invalid ArrayType " + array_type_str);
   }
   return Status::Ok();
+}
+
+/** Throws error if the input ArrayType is not Dense or Sparse. */
+inline void ensure_array_type_is_valid(uint8_t array_type_enum) {
+  auto type = ArrayType(array_type_enum);
+  if (type != ArrayType::DENSE && type != ArrayType::SPARSE) {
+    throw std::runtime_error(
+        "Invalid ArrayType (" + std::to_string(array_type_enum) + ")");
+  }
 }
 
 }  // namespace sm

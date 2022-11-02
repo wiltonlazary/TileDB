@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -76,6 +76,12 @@ class PositiveDeltaFilter : public Filter {
   /** Constructor. */
   PositiveDeltaFilter();
 
+  /** Constructor.
+   *
+   * @param max_window_size
+   */
+  PositiveDeltaFilter(uint32_t max_window_size);
+
   /** Return the max window size used by the filter. */
   uint32_t max_window_size() const;
 
@@ -86,6 +92,8 @@ class PositiveDeltaFilter : public Filter {
    * Perform positive-delta encoding of the given input into the given output.
    */
   Status run_forward(
+      const Tile& tile,
+      Tile* const tile_offsets,
       FilterBuffer* input_metadata,
       FilterBuffer* input,
       FilterBuffer* output_metadata,
@@ -95,6 +103,8 @@ class PositiveDeltaFilter : public Filter {
    * Perform positive-delta decoding of the given input into the given output.
    */
   Status run_reverse(
+      const Tile& tile,
+      Tile* const tile_offsets,
       FilterBuffer* input_metadata,
       FilterBuffer* input,
       FilterBuffer* output_metadata,
@@ -126,15 +136,14 @@ class PositiveDeltaFilter : public Filter {
       FilterBuffer* output,
       FilterBuffer* output_metadata) const;
 
-  /** Deserializes this filter's metadata from the given buffer. */
-  Status deserialize_impl(ConstBuffer* buff) override;
-
   /** Gets an option from this filter. */
   Status get_option_impl(FilterOption option, void* value) const override;
 
   /** Run_forward method templated on the tile cell datatype. */
   template <typename T>
   Status run_forward(
+      const Tile& tile,
+      Tile* const tile_offsets,
       FilterBuffer* input_metadata,
       FilterBuffer* input,
       FilterBuffer* output_metadata,
@@ -143,6 +152,8 @@ class PositiveDeltaFilter : public Filter {
   /** Run_reverse method templated on the tile cell datatype. */
   template <typename T>
   Status run_reverse(
+      const Tile& tile,
+      Tile* const tile_offsets,
       FilterBuffer* input_metadata,
       FilterBuffer* input,
       FilterBuffer* output_metadata,
@@ -152,7 +163,7 @@ class PositiveDeltaFilter : public Filter {
   Status set_option_impl(FilterOption option, const void* value) override;
 
   /** Serializes this filter's metadata to the given buffer. */
-  Status serialize_impl(Buffer* buff) const override;
+  void serialize_impl(Serializer& serializer) const override;
 };
 
 }  // namespace sm

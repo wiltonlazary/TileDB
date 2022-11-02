@@ -46,29 +46,48 @@ namespace tiledb::common {
 /*     CONSTRUCTORS & DESTRUCTORS    */
 /* ********************************* */
 
-Logger::Logger() {
-  logger_ = spdlog::get("tiledb");
+Logger::Logger(
+    const std::string& name, const Logger::Format format, const bool root)
+    : name_(name)
+    , root_(root) {
+  logger_ = spdlog::get(name_);
   if (logger_ == nullptr) {
 #ifdef _WIN32
-    logger_ = spdlog::stdout_logger_mt("tiledb");
+    logger_ = spdlog::stdout_logger_mt(name_);
 #else
-    logger_ = spdlog::stdout_color_mt("tiledb");
+    logger_ = spdlog::stdout_color_mt(name_);
 #endif
   }
-  // Set the default logging format
-  // [Year-month-day 24hr-min-second.microsecond]
-  // [logger]
-  // [Process: id]
-  // [Thread: id]
-  // [log level]
-  // text to log...
-  logger_->set_pattern(
-      "[%Y-%m-%d %H:%M:%S.%e] [%n] [Process: %P] [Thread: %t] [%l] %v");
-  logger_->set_level(spdlog::level::critical);
+  if (root && format == Logger::Format::JSON) {
+    // If this is the first logger created set up the opening brace and an
+    // array named "log"
+    logger_->set_pattern("{\n \"log\": [");
+    logger_->critical("");
+  }
+  set_level(Logger::Level::ERR);
+  set_format(format);
+}
+
+Logger::Logger(shared_ptr<spdlog::logger> logger) {
+  logger_ = std::move(logger);
 }
 
 Logger::~Logger() {
-  spdlog::drop("tiledb");
+  if (root_ && fmt_ == Logger::Format::JSON) {
+    // If this is the root/global logger being destroyed, then we output
+    // "Logging finished"
+    std::string last_log_pattern = {
+        "{\"severity\":\"%l\",\"timestamp\":\"%Y-%m-%dT%H:%M:%S.%f%z\","
+        "\"process\":\"%P\",\"name\":{%n},\"message\":\"%v\"}"};
+    logger_->set_pattern(last_log_pattern);
+    // Log a last entry
+    logger_->critical("Finished logging.");
+    // set the last pattern to close out the "log" json array and the closing
+    // brace
+    logger_->set_pattern("]\n}");
+    logger_->critical("");
+  }
+  spdlog::drop(name_);
 }
 
 void Logger::trace(const char* msg) {
@@ -95,6 +114,20 @@ void Logger::critical(const char* msg) {
   logger_->critical(msg);
 }
 
+void Logger::fatal(const char* msg) {
+  logger_->error(msg);
+  exit(1);
+}
+
+Status Logger::status(const Status& st) {
+  logger_->error(st.message());
+  return st;
+}
+
+void Logger::status_no_return_value(const Status& st) {
+  logger_->error(st.message());
+}
+
 void Logger::trace(const std::string& msg) {
   logger_->trace(msg);
 }
@@ -117,6 +150,11 @@ void Logger::error(const std::string& msg) {
 
 void Logger::critical(const std::string& msg) {
   logger_->critical(msg);
+}
+
+void Logger::fatal(const std::string& msg) {
+  logger_->error(msg);
+  exit(1);
 }
 
 void Logger::trace(const std::stringstream& msg) {
@@ -143,6 +181,11 @@ void Logger::critical(const std::stringstream& msg) {
   logger_->critical(msg.str());
 }
 
+void Logger::fatal(const std::stringstream& msg) {
+  logger_->error(msg.str());
+  exit(1);
+}
+
 void Logger::set_level(Logger::Level lvl) {
   switch (lvl) {
     case Logger::Level::FATAL:
@@ -166,12 +209,87 @@ void Logger::set_level(Logger::Level lvl) {
   }
 }
 
+void Logger::set_format(Logger::Format fmt) {
+  switch (fmt) {
+    case Logger::Format::JSON: {
+      /*
+       * Set up the JSON format
+       * {
+       *  "severity": "log level",
+       *  "timestamp": ISO 8601 time/date format,
+       *  "process": "id",
+       *  "name": {
+       *    "Context": "uid",
+       *    "Query": "uid",
+       *    "Writer": "uid"
+       *  },
+       *  "message": "text to log"
+       * },
+       */
+      std::string json_pattern = {
+          "{\"severity\":\"%l\",\"timestamp\":\"%Y-%m-%dT%H:%M:%S.%f%z\","
+          "\"process\":\"%P\",\"name\":{%n},\"message\":\"%v\"},"};
+      logger_->set_pattern(json_pattern);
+      break;
+    }
+    default: {
+      /*
+       * Set up the default logging format
+       * [Year-month-day 24hr-min-second.microsecond]
+       * [Process: id]
+       * [log level]
+       * [logger name]
+       * text to log
+       */
+      std::string default_pattern =
+          "[%Y-%m-%d %H:%M:%S.%e] [Process: %P] [%l] [%n] %v";
+      logger_->set_pattern(default_pattern);
+      break;
+    }
+  }
+  fmt_ = fmt;
+}
+
+void Logger::set_name(const std::string& tags) {
+  name_ = tags;
+}
+
+shared_ptr<Logger> Logger::clone(const std::string& tag, uint64_t id) {
+  std::string new_tags = add_tag(tag, id);
+  auto new_logger = make_shared<Logger>(HERE(), logger_->clone(new_tags));
+  new_logger->set_name(new_tags);
+  return new_logger;
+}
+
+std::string Logger::add_tag(const std::string& tag, uint64_t id) {
+  std::string tags;
+  switch (fmt_) {
+    case Logger::Format::JSON: {
+      tags = name_.empty() ? fmt::format("\"{}\":\"{}\"", tag, id) :
+                             fmt::format("{},\"{}\":\"{}\"", name_, tag, id);
+      break;
+    }
+    default:
+      tags = name_.empty() ? fmt::format("{}: {}", tag, id) :
+                             fmt::format("{}] [{}: {}", name_, tag, id);
+  }
+  return tags;
+}
+
 /* ********************************* */
 /*              GLOBAL               */
 /* ********************************* */
 
-Logger& global_logger() {
-  static Logger l;
+Logger& global_logger(Logger::Format format) {
+  static auto ts_micro =
+      std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::system_clock::now().time_since_epoch())
+          .count();
+  static std::string name =
+      (format == Logger::Format::JSON) ?
+          "\"" + std::to_string(ts_micro) + "-Global\":\"1\"" :
+          std::to_string(ts_micro) + "-Global";
+  static Logger l(name, format, true);
   return l;
 }
 
@@ -206,10 +324,14 @@ Status LOG_STATUS(const Status& st) {
   return st;
 }
 
-/** Logs an error and exits with a non-zero status. */
-void LOG_FATAL(const std::string& msg) {
-  global_logger().error(msg);
-  exit(1);
+/** Logs a status without returning it. */
+void LOG_STATUS_NO_RETURN_VALUE(const Status& st) {
+  global_logger().error(st.to_string());
+}
+
+/** Logs a status. */
+void LOG_STATUS(const StatusException& se) {
+  global_logger().error(se.what());
 }
 
 /** Logs a trace. */
@@ -235,12 +357,6 @@ void LOG_WARN(const std::stringstream& msg) {
 /** Logs an error. */
 void LOG_ERROR(const std::stringstream& msg) {
   global_logger().error(msg);
-}
-
-/** Logs an error and exits with a non-zero status. */
-void LOG_FATAL(const std::stringstream& msg) {
-  global_logger().error(msg);
-  exit(1);
 }
 
 }  // namespace tiledb::common

@@ -68,7 +68,7 @@ Status Watchdog::initialize() {
   try {
     thread_ = std::thread([this]() { watchdog_thread(this); });
   } catch (const std::exception& e) {
-    return Status::Error(
+    return Status_Error(
         std::string("Could not initialize watchdog thread; ") + e.what());
   }
   return Status::Ok();
@@ -86,7 +86,7 @@ void Watchdog::watchdog_thread(Watchdog* watchdog) {
 
     if (SignalHandlers::signal_received()) {
       for (auto* sm : GlobalState::GetGlobalState().storage_managers()) {
-        sm->cancel_all_tasks();
+        throw_if_not_ok(sm->cancel_all_tasks());
       }
     }
 

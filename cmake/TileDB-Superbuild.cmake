@@ -27,6 +27,7 @@ set(INHERITED_CMAKE_ARGS
   -DCMAKE_CXX_FLAGS=${CMAKE_CXX_FLAGS}
   -DCOMPILER_SUPPORTS_AVX2=${COMPILER_SUPPORTS_AVX2}
   -DTILEDB_VERBOSE=${TILEDB_VERBOSE}
+  -DTILEDB_ASSERTIONS=${TILEDB_ASSERTIONS}
   -DTILEDB_S3=${TILEDB_S3}
   -DTILEDB_AZURE=${TILEDB_AZURE}
   -DTILEDB_GCS=${TILEDB_GCS}
@@ -42,8 +43,12 @@ set(INHERITED_CMAKE_ARGS
   -DTILEDB_TOOLS=${TILEDB_TOOLS}
   -DTILEDB_SERIALIZATION=${TILEDB_SERIALIZATION}
   -DTILEDB_ARROW_TESTS=${TILEDB_ARROW_TESTS}
+  -DTILEDB_CRC32=${TILEDB_CRC32}
+  -DTILEDB_WEBP=${TILEDB_WEBP}
+  -DTILEDB_ABSEIL=${TILEDB_ABSEIL}
   -DTILEDB_INSTALL_LIBDIR=${TILEDB_INSTALL_LIBDIR}
   -DCMAKE_OSX_ARCHITECTURES=${CMAKE_OSX_ARCHITECTURES}
+  -DTILEDB_EXPERIMENTAL_FEATURES=${TILEDB_EXPERIMENTAL_FEATURES}
 )
 
 if (TILEDB_TESTS)
@@ -53,7 +58,8 @@ if (TILEDB_TESTS)
   )
 endif()
 
-if (WIN32)
+# MSVC_MP_FLAG is defined by bootstrap.ps1
+if (DEFINED MSVC_MP_FLAG)
   list(APPEND INHERITED_CMAKE_ARGS
     -DMSVC_MP_FLAG=${MSVC_MP_FLAG}
   )
@@ -82,6 +88,19 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules/FindLZ4_EP.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules/FindSpdlog_EP.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules/FindZlib_EP.cmake)
 include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules/FindZstd_EP.cmake)
+include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules/FindMagic_EP.cmake)
+
+if(TILEDB_CRC32)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules/FindCrc32c_EP.cmake)
+endif()
+
+if(TILEDB_WEBP)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules/FindWebp_EP.cmake)
+endif()
+
+if(TILEDB_ABSEIL)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules/Findabsl_EP.cmake)
+endif()
 
 if (TILEDB_SERIALIZATION)
   include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/Modules/FindCapnp_EP.cmake)
@@ -173,20 +192,11 @@ endif()
 if (${CLANG_FORMAT_FOUND})
   message(STATUS "clang hunt, found ${CLANG_FORMAT_BIN}")
   # runs clang format and updates files in place.
-  add_custom_target(format ${SCRIPTS_DIR}/run-clang-format.sh ${CMAKE_CURRENT_SOURCE_DIR} ${CLANG_FORMAT_BIN} 1
-    `find ${CMAKE_CURRENT_SOURCE_DIR}/tiledb
-    ${CMAKE_CURRENT_SOURCE_DIR}/test/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/examples
-    ${CMAKE_CURRENT_SOURCE_DIR}/tools
-    -name \\*.cc -or -name \\*.c -or -name \\*.h`)
+
+  add_custom_target(format ${SCRIPTS_DIR}/run-clang-format.sh ${CMAKE_CURRENT_SOURCE_DIR} ${CLANG_FORMAT_BIN} 1)
 
   # runs clang format and exits with a non-zero exit code if any files need to be reformatted
-  add_custom_target(check-format ${SCRIPTS_DIR}/run-clang-format.sh ${CMAKE_CURRENT_SOURCE_DIR} ${CLANG_FORMAT_BIN} 0
-    `find ${CMAKE_CURRENT_SOURCE_DIR}/tiledb
-    ${CMAKE_CURRENT_SOURCE_DIR}/test/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/examples
-    ${CMAKE_CURRENT_SOURCE_DIR}/tools
-    -name \\*.cc -or -name \\*.c -or -name \\*.h`)
+  add_custom_target(check-format ${SCRIPTS_DIR}/run-clang-format.sh ${CMAKE_CURRENT_SOURCE_DIR} ${CLANG_FORMAT_BIN} 0)
 else()
   message(STATUS "was unable to find clang-format")
 endif()
@@ -197,8 +207,14 @@ endif()
 
 find_package(Doxygen)
 if(DOXYGEN_FOUND)
-  set(TILEDB_C_API_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/tiledb/sm/c_api/tiledb.h")
-  file(GLOB TILEDB_CPP_API_HEADERS "${CMAKE_CURRENT_SOURCE_DIR}/tiledb/sm/cpp_api/*.h")
+  file(GLOB_RECURSE TILEDB_C_API_HEADERS "*_api_external.h")
+  list(APPEND TILEDB_C_API_HEADERS
+      "${CMAKE_CURRENT_SOURCE_DIR}/tiledb/api/c_api/api_external_common.h"
+      "${CMAKE_CURRENT_SOURCE_DIR}/tiledb/sm/c_api/tiledb.h"
+  )
+  file(GLOB TILEDB_CPP_API_HEADERS
+      "${CMAKE_CURRENT_SOURCE_DIR}/tiledb/sm/cpp_api/*.h"
+  )
   set(TILEDB_API_HEADERS ${TILEDB_C_API_HEADERS} ${TILEDB_CPP_API_HEADERS})
   add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/doxyfile.in
     COMMAND mkdir -p doxygen

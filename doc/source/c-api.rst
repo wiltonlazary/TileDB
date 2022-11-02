@@ -33,6 +33,8 @@ Types
     :project: TileDB-C
 .. doxygentypedef:: tiledb_filter_list_t
     :project: TileDB-C
+.. doxygentypedef:: tiledb_fragment_info_t
+    :project: TileDB-C
 .. doxygentypedef:: tiledb_vfs_t
     :project: TileDB-C
 .. doxygentypedef:: tiledb_vfs_fh_t
@@ -57,6 +59,8 @@ Constants
     :project: TileDB-C
 .. doxygendefine:: TILEDB_OFFSET_SIZE
     :project: TileDB-C
+.. doxygendefine:: TILEDB_TIMESTAMPS
+    :project: TileDB-C
 .. doxygenfunction:: tiledb_coords
     :project: TileDB-C
 .. doxygenfunction:: tiledb_var_num
@@ -66,6 +70,8 @@ Constants
 .. doxygenfunction:: tiledb_datatype_size
     :project: TileDB-C
 .. doxygenfunction:: tiledb_offset_size
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_timestamps
     :project: TileDB-C
 
 Enumerations
@@ -151,6 +157,8 @@ Context
 .. doxygenfunction:: tiledb_ctx_alloc
     :project: TileDB-C
 .. doxygenfunction:: tiledb_ctx_free
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_ctx_get_stats
     :project: TileDB-C
 .. doxygenfunction:: tiledb_ctx_get_config
     :project: TileDB-C
@@ -238,10 +246,6 @@ Array
 .. doxygenfunction:: tiledb_array_get_query_type
     :project: TileDB-C
 .. doxygenfunction:: tiledb_array_get_non_empty_domain
-    :project: TileDB-C
-.. doxygenfunction:: tiledb_array_max_buffer_size
-    :project: TileDB-C
-.. doxygenfunction:: tiledb_array_max_buffer_size_var
     :project: TileDB-C
 .. doxygenfunction:: tiledb_array_get_uri
     :project: TileDB-C
@@ -342,6 +346,10 @@ Attribute
 .. doxygenfunction:: tiledb_attribute_set_fill_value
     :project: TileDB-C
 .. doxygenfunction:: tiledb_attribute_get_fill_value
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_attribute_set_fill_value_nullable
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_attribute_get_fill_value_nullable
     :project: TileDB-C
 
 Domain
@@ -466,6 +474,46 @@ Query
 .. doxygenfunction:: tiledb_query_get_fragment_uri
     :project: TileDB-C
 .. doxygenfunction:: tiledb_query_get_fragment_timestamp_range
+    :project: TileDB-C
+
+.. doxygenfunction:: tiledb_query_set_subarray_t
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_query_get_subarray_t
+    :project: TileDB-C
+
+Subarray
+--------
+.. doxygenfunction:: tiledb_subarray_alloc
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_free
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_set_coalesce_ranges
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_set_subarray
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_add_range
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_add_range_by_name
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_add_range_var
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_add_range_var_by_name
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_get_range_num
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_get_range_num_from_name
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_get_range
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_get_range_from_name
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_get_range_var_size
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_get_range_var_size_from_name
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_get_range_var
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_subarray_get_range_var_from_name
     :project: TileDB-C
 
 Filter
@@ -634,9 +682,15 @@ Fragment Info
     :project: TileDB-C
 .. doxygenfunction:: tiledb_fragment_info_free
     :project: TileDB-C
+.. doxygenfunction:: tiledb_fragment_info_set_config
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_fragment_info_get_config
+    :project: TileDB-C
 .. doxygenfunction:: tiledb_fragment_info_load
     :project: TileDB-C
 .. doxygenfunction:: tiledb_fragment_info_load_with_key
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_fragment_info_get_fragment_name
     :project: TileDB-C
 .. doxygenfunction:: tiledb_fragment_info_get_fragment_num
     :project: TileDB-C
@@ -662,6 +716,20 @@ Fragment Info
     :project: TileDB-C
 .. doxygenfunction:: tiledb_fragment_info_get_non_empty_domain_var_from_name
     :project: TileDB-C
+.. doxygenfunction:: tiledb_fragment_info_get_mbr_num
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_fragment_info_get_mbr_from_index
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_fragment_info_get_mbr_from_name
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_fragment_info_get_mbr_var_size_from_index
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_fragment_info_get_mbr_var_size_from_name
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_fragment_info_get_mbr_var_from_index
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_fragment_info_get_mbr_var_from_name
+    :project: TileDB-C
 .. doxygenfunction:: tiledb_fragment_info_get_cell_num
     :project: TileDB-C
 .. doxygenfunction:: tiledb_fragment_info_get_version
@@ -674,5 +742,14 @@ Fragment Info
     :project: TileDB-C
 .. doxygenfunction:: tiledb_fragment_info_get_to_vacuum_uri
     :project: TileDB-C
+.. doxygenfunction:: tiledb_fragment_info_get_array_schema
+    :project: TileDB-C
+.. doxygenfunction:: tiledb_fragment_info_get_array_schema_name
+    :project: TileDB-C
 .. doxygenfunction:: tiledb_fragment_info_dump
+    :project: TileDB-C
+
+Experimental
+-------------
+.. autodoxygenfile:: tiledb_experimental.h
     :project: TileDB-C

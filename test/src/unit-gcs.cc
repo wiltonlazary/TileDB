@@ -32,11 +32,14 @@
 
 #ifdef HAVE_GCS
 
-#include "catch.hpp"
+#include <test/support/tdb_catch.h>
+#include "tiledb/common/filesystem/directory_entry.h"
 #include "tiledb/common/thread_pool.h"
 #include "tiledb/sm/config/config.h"
 #include "tiledb/sm/filesystem/gcs.h"
 #include "tiledb/sm/global_state/unit_test_config.h"
+#include "tiledb/sm/misc/tdb_math.h"
+#include "tiledb/sm/misc/tdb_time.h"
 #include "tiledb/sm/misc/utils.h"
 
 #include <sstream>
@@ -51,7 +54,7 @@ struct GCSFx {
   const std::string TEST_DIR = GCS_BUCKET.to_string() + "tiledb_test_dir/";
 
   tiledb::sm::GCS gcs_;
-  ThreadPool thread_pool_;
+  ThreadPool thread_pool_{2};
 
   GCSFx() = default;
   ~GCSFx();
@@ -77,8 +80,6 @@ GCSFx::~GCSFx() {
 
 void GCSFx::init_gcs(Config&& config) {
   REQUIRE(config.set("vfs.gcs.project_id", "TODO").ok());
-
-  REQUIRE(thread_pool_.init(2).ok());
   REQUIRE(gcs_.init(config, &thread_pool_).ok());
 
   // Create bucket
@@ -105,9 +106,23 @@ std::string GCSFx::random_bucket_name(const std::string& prefix) {
   return ss.str();
 }
 
+TEST_CASE_METHOD(GCSFx, "Test GCS init", "[gcs]") {
+  try {
+    Config config;
+    REQUIRE(config.set("vfs.gcs.use_multi_part_upload", "true").ok());
+    init_gcs(std::move(config));
+  } catch (...) {
+    INFO(
+        "GCS initialization failed. In order to run GCS tests, be sure to "
+        "source scripts/run-gcs.sh in this shell session before starting test "
+        "runner.");
+    REQUIRE(false);
+  }
+}
+
 TEST_CASE_METHOD(GCSFx, "Test GCS filesystem, file management", "[gcs]") {
   Config config;
-  config.set("vfs.gcs.use_multi_part_upload", "true");
+  REQUIRE(config.set("vfs.gcs.use_multi_part_upload", "true").ok());
   init_gcs(std::move(config));
 
   /* Create the following file hierarchy:
@@ -184,6 +199,23 @@ TEST_CASE_METHOD(GCSFx, "Test GCS filesystem, file management", "[gcs]") {
   REQUIRE(gcs_.is_dir(URI(TEST_DIR + "dir"), &is_dir).ok());
   REQUIRE(is_dir);  // This is viewed as a dir
 
+  // ls_with_sizes
+  std::string s = "abcdef";
+  CHECK(gcs_.write(URI(file3), s.data(), s.size()).ok());
+  REQUIRE(gcs_.flush_object(URI(file3)).ok());
+
+  auto&& [status, rv] = gcs_.ls_with_sizes(URI(dir));
+  auto children = *rv;
+  REQUIRE(status.ok());
+
+  REQUIRE(children.size() == 2);
+  CHECK(children[0].path().native() == file3);
+  CHECK(children[1].path().native() == subdir.substr(0, subdir.size() - 1));
+
+  CHECK(children[0].file_size() == s.size());
+  // Directories don't get a size
+  CHECK(children[1].file_size() == 0);
+
   // Move file
   REQUIRE(gcs_.move_object(URI(file5), URI(file6)).ok());
   REQUIRE(gcs_.is_object(URI(file5), &is_object).ok());
@@ -226,9 +258,12 @@ TEST_CASE_METHOD(
   Config config;
   const uint64_t max_parallel_ops = 1;
   const uint64_t multi_part_size = 4 * 1024 * 1024;
-  config.set("vfs.gcs.max_parallel_ops", std::to_string(max_parallel_ops));
-  config.set("vfs.gcs.use_multi_part_upload", "true");
-  config.set("vfs.gcs.multi_part_size", std::to_string(multi_part_size));
+  REQUIRE(
+      config.set("vfs.gcs.max_parallel_ops", std::to_string(max_parallel_ops))
+          .ok());
+  REQUIRE(config.set("vfs.gcs.use_multi_part_upload", "true").ok());
+  REQUIRE(config.set("vfs.gcs.multi_part_size", std::to_string(multi_part_size))
+              .ok());
   init_gcs(std::move(config));
 
   const uint64_t write_cache_max_size = max_parallel_ops * multi_part_size;
@@ -311,9 +346,12 @@ TEST_CASE_METHOD(
   Config config;
   const uint64_t max_parallel_ops = 1;
   const uint64_t multi_part_size = 4 * 1024 * 1024;
-  config.set("vfs.gcs.max_parallel_ops", std::to_string(max_parallel_ops));
-  config.set("vfs.gcs.use_multi_part_upload", "false");
-  config.set("vfs.gcs.multi_part_size", std::to_string(multi_part_size));
+  REQUIRE(
+      config.set("vfs.gcs.max_parallel_ops", std::to_string(max_parallel_ops))
+          .ok());
+  REQUIRE(config.set("vfs.gcs.use_multi_part_upload", "false").ok());
+  REQUIRE(config.set("vfs.gcs.multi_part_size", std::to_string(multi_part_size))
+              .ok());
   init_gcs(std::move(config));
 
   const uint64_t write_cache_max_size = max_parallel_ops * multi_part_size;
@@ -389,9 +427,12 @@ TEST_CASE_METHOD(
   Config config;
   const uint64_t max_parallel_ops = 4;
   const uint64_t multi_part_size = 4 * 1024 * 1024;
-  config.set("vfs.gcs.max_parallel_ops", std::to_string(max_parallel_ops));
-  config.set("vfs.gcs.use_multi_part_upload", "true");
-  config.set("vfs.gcs.multi_part_size", std::to_string(multi_part_size));
+  REQUIRE(
+      config.set("vfs.gcs.max_parallel_ops", std::to_string(max_parallel_ops))
+          .ok());
+  REQUIRE(config.set("vfs.gcs.use_multi_part_upload", "true").ok());
+  REQUIRE(config.set("vfs.gcs.multi_part_size", std::to_string(multi_part_size))
+              .ok());
   init_gcs(std::move(config));
 
   const uint64_t write_cache_max_size = max_parallel_ops * multi_part_size;
@@ -474,9 +515,12 @@ TEST_CASE_METHOD(
   Config config;
   const uint64_t max_parallel_ops = 4;
   const uint64_t multi_part_size = 4 * 1024 * 1024;
-  config.set("vfs.gcs.max_parallel_ops", std::to_string(max_parallel_ops));
-  config.set("vfs.gcs.use_multi_part_upload", "false");
-  config.set("vfs.gcs.multi_part_size", std::to_string(multi_part_size));
+  REQUIRE(
+      config.set("vfs.gcs.max_parallel_ops", std::to_string(max_parallel_ops))
+          .ok());
+  REQUIRE(config.set("vfs.gcs.use_multi_part_upload", "false").ok());
+  REQUIRE(config.set("vfs.gcs.multi_part_size", std::to_string(multi_part_size))
+              .ok());
   init_gcs(std::move(config));
 
   const uint64_t write_cache_max_size = max_parallel_ops * multi_part_size;
@@ -552,9 +596,12 @@ TEST_CASE_METHOD(
   Config config;
   const uint64_t max_parallel_ops = 4;
   const uint64_t multi_part_size = 4 * 1024;
-  config.set("vfs.gcs.max_parallel_ops", std::to_string(max_parallel_ops));
-  config.set("vfs.gcs.use_multi_part_upload", "true");
-  config.set("vfs.gcs.multi_part_size", std::to_string(multi_part_size));
+  REQUIRE(
+      config.set("vfs.gcs.max_parallel_ops", std::to_string(max_parallel_ops))
+          .ok());
+  REQUIRE(config.set("vfs.gcs.use_multi_part_upload", "true").ok());
+  REQUIRE(config.set("vfs.gcs.multi_part_size", std::to_string(multi_part_size))
+              .ok());
   init_gcs(std::move(config));
 
   const uint64_t write_cache_max_size = max_parallel_ops * multi_part_size;

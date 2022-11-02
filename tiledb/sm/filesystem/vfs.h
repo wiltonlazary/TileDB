@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -39,17 +39,17 @@
 #include <string>
 #include <vector>
 
+#include "tiledb/common/common.h"
+#include "tiledb/common/filesystem/directory_entry.h"
 #include "tiledb/common/macros.h"
 #include "tiledb/common/status.h"
-#include "tiledb/common/thread_pool.h"
 #include "tiledb/sm/buffer/buffer.h"
 #include "tiledb/sm/cache/lru_cache.h"
 #include "tiledb/sm/config/config.h"
-#include "tiledb/sm/filesystem/filelock.h"
 #include "tiledb/sm/filesystem/mem_filesystem.h"
 #include "tiledb/sm/misc/cancelable_tasks.h"
-#include "tiledb/sm/misc/uri.h"
 #include "tiledb/sm/stats/stats.h"
+#include "uri.h"
 
 #ifdef _WIN32
 #include "tiledb/sm/filesystem/win.h"
@@ -75,11 +75,47 @@
 
 using namespace tiledb::common;
 
-namespace tiledb {
-namespace sm {
+namespace tiledb::sm {
+
+class Tile;
 
 enum class Filesystem : uint8_t;
 enum class VFSMode : uint8_t;
+
+/** The VFS configuration parameters. */
+struct VFSParameters {
+  VFSParameters() = delete;
+
+  VFSParameters(const Config& config)
+      : max_batch_size_(config.get<uint64_t>("vfs.max_batch_size").value())
+      , min_batch_gap_(config.get<uint64_t>("vfs.min_batch_gap").value())
+      , min_batch_size_(config.get<uint64_t>("vfs.min_batch_size").value())
+      , min_parallel_size_(
+            config.get<uint64_t>("vfs.min_parallel_size").value())
+      , read_ahead_cache_size_(
+            config.get<uint64_t>("vfs.read_ahead_cache_size").value())
+      , read_ahead_size_(config.get<uint64_t>("vfs.read_ahead_size").value()){};
+
+  ~VFSParameters() = default;
+
+  /** The maximum number of bytes in a batched read operation. */
+  uint64_t max_batch_size_;
+
+  /** The minimum number of bytes between two read batches. */
+  uint64_t min_batch_gap_;
+
+  /** The minimum number of bytes in a batched read operation. */
+  uint64_t min_batch_size_;
+
+  /** The minimum number of bytes in a parallel operation. */
+  uint64_t min_parallel_size_;
+
+  /** The byte size of the read-ahead cache. */
+  uint64_t read_ahead_cache_size_;
+
+  /** The byte size to read-ahead for each read. */
+  uint64_t read_ahead_size_;
+};
 
 /**
  * This class implements a virtual filesystem that directs filesystem-related
@@ -88,11 +124,40 @@ enum class VFSMode : uint8_t;
 class VFS {
  public:
   /* ********************************* */
+  /*          TYPE DEFINITIONS         */
+  /* ********************************* */
+  /**
+   * Multipart upload state definition used in the serialization of remote
+   * global order writes. This state is a generalization of
+   * the multipart upload state types currently defined independently by each
+   * backend implementation.
+   */
+  struct MultiPartUploadState {
+    struct CompletedParts {
+      optional<std::string> e_tag;
+      uint64_t part_number;
+    };
+
+    uint64_t part_number;
+    optional<std::string> upload_id;
+    std::vector<CompletedParts> completed_parts;
+    Status status;
+  };
+
+  /* ********************************* */
   /*     CONSTRUCTORS & DESTRUCTORS    */
   /* ********************************* */
 
-  /** Constructor. */
-  VFS();
+  /** Constructor.
+   * @param parent_stats The parent stats to inherit from.
+   * @param compute_tp Thread pool for compute-bound tasks.
+   * @param io_tp Thread pool for io-bound tasks.
+   * @param config Configuration parameters.
+   **/
+  VFS(stats::Stats* parent_stats,
+      ThreadPool* compute_tp,
+      ThreadPool* io_tp,
+      const Config& config);
 
   /** Destructor. */
   ~VFS() = default;
@@ -198,27 +263,6 @@ class VFS {
   Status remove_file(const URI& uri) const;
 
   /**
-   * Locks a filelock.
-   *
-   * @param uri The URI of the filelock.
-   * @param lock A handle for the filelock (used in unlocking the
-   *     filelock).
-   * @param shared *True* if it is a shared lock, *false* if it is an
-   *     exclusive lock.
-   * @return Status
-   */
-  Status filelock_lock(const URI& uri, filelock_t* lock, bool shared) const;
-
-  /**
-   * Unlocks a filelock.
-   *
-   * @param uri The URI of the filelock.
-   * @param lock The handle of the filelock.
-   * @return Status
-   */
-  Status filelock_unlock(const URI& uri) const;
-
-  /**
    * Retrieves the size of a file.
    *
    * @param uri The URI of the file.
@@ -267,29 +311,6 @@ class VFS {
   Status is_empty_bucket(const URI& uri, bool* is_empty) const;
 
   /**
-   * Initializes the virtual filesystem with the given configuration.
-   *
-   * @param parent_stats The parent stats to inherit from.
-   * @param config Configuration parameters
-   * @return Status
-   */
-  Status init(
-      stats::Stats* parent_stats,
-      ThreadPool* compute_tp,
-      ThreadPool* io_tp,
-      const Config* ctx_config,
-      const Config* vfs_config);
-
-  /**
-   * Terminates the virtual system. Must only be called if init() returned
-   * successfully. The behavior is undefined if not successfully invoked prior
-   * to destructing this object.
-   *
-   * @return Status
-   */
-  Status terminate();
-
-  /**
    * Retrieves all the URIs that have the first input as parent.
    *
    * @param parent The target directory to list.
@@ -297,6 +318,15 @@ class VFS {
    * @return Status
    */
   Status ls(const URI& parent, std::vector<URI>* uris) const;
+
+  /**
+   * Retrieves all the entries contained in the parent.
+   *
+   * @param parent The target directory to list.
+   * @return All entries that are contained in the parent
+   */
+  tuple<Status, optional<std::vector<filesystem::directory_entry>>>
+  ls_with_sizes(const URI& parent) const;
 
   /**
    * Renames a file.
@@ -364,7 +394,25 @@ class VFS {
    */
   Status read_all(
       const URI& uri,
-      const std::vector<std::tuple<uint64_t, void*, uint64_t>>& regions,
+      const std::vector<tuple<uint64_t, Tile*, uint64_t>>& regions,
+      ThreadPool* thread_pool,
+      std::vector<ThreadPool::Task>* tasks,
+      bool use_read_ahead = true);
+
+  /**
+   * Reads multiple regions from a file with no batching.
+   *
+   * @param uri The URI of the file.
+   * @param regions The list of regions to read. Each region is a tuple
+   *    `(file_offset, dest_buffer, nbytes)`.
+   * @param thread_pool Thread pool to execute async read tasks to.
+   * @param tasks Vector to which new async read tasks are pushed.
+   * @param use_read_ahead Whether to use the read-ahead cache.
+   * @return Status
+   */
+  Status read_all_no_batching(
+      const URI& uri,
+      const std::vector<tuple<uint64_t, Tile*, uint64_t>>& regions,
       ThreadPool* thread_pool,
       std::vector<ThreadPool::Task>* tasks,
       bool use_read_ahead = true);
@@ -422,6 +470,37 @@ class VFS {
    */
   Status write(const URI& uri, const void* buffer, uint64_t buffer_size);
 
+  /**
+   * Used in serialization to share the multipart upload state
+   * among cloud executors during global order writes
+   *
+   * @param uri The file uri used as key in the internal map of the backend
+   * @return A pair of status and VFS::MultiPartUploadState object.
+   */
+  std::pair<Status, std::optional<MultiPartUploadState>> multipart_upload_state(
+      const URI& uri);
+
+  /**
+   * Used in serialization of global order writes to set the multipart upload
+   * state in the internal maps of cloud backends during deserialization
+   *
+   * @param uri The file uri used as key in the internal map of the backend
+   * @param state The multipart upload state info
+   * @return Status
+   */
+  Status set_multipart_upload_state(
+      const URI& uri, const MultiPartUploadState& state);
+
+  /**
+   * Used in remote global order writes to flush the internal
+   * in-memory buffer for an URI that backends maintain to modulate the
+   * frequency of multipart upload requests.
+   *
+   * @param uri The file uri identifying the backend file buffer
+   * @return Status
+   */
+  Status flush_multipart_file_buffer(const URI& uri);
+
  private:
   /* ********************************* */
   /*        PRIVATE DATATYPES          */
@@ -432,7 +511,7 @@ class VFS {
    */
   struct BatchedRead {
     /** Construct a BatchedRead consisting of the single given region. */
-    BatchedRead(const std::tuple<uint64_t, void*, uint64_t>& region) {
+    BatchedRead(const tuple<uint64_t, Tile*, uint64_t>& region) {
       offset = std::get<0>(region);
       nbytes = std::get<2>(region);
       regions.push_back(region);
@@ -448,7 +527,7 @@ class VFS {
      * Original regions making up the batch. Vector of tuples of the form
      * (offset, dest_buffer, nbytes).
      */
-    std::vector<std::tuple<uint64_t, void*, uint64_t>> regions;
+    std::vector<tuple<uint64_t, Tile*, uint64_t>> regions;
   };
 
   /**
@@ -636,14 +715,14 @@ class VFS {
   /** The in-memory filesystem which is always supported */
   MemFilesystem memfs_;
 
-  /** Config. */
+  /**
+   * Config.
+   *
+   * Note: This object is stored on the VFS for:
+   * use of API 'tiledb_vfs_get_config'.
+   * pass-by-reference initialization of filesystems' config_ member variables.
+   **/
   Config config_;
-
-  /** `true` if the VFS object has been initialized. */
-  bool init_;
-
-  /** The byte size to read-ahead for each read. */
-  uint64_t read_ahead_size_;
 
   /** The set with the supported filesystems. */
   std::set<Filesystem> supported_fs_;
@@ -660,6 +739,9 @@ class VFS {
   /** The read-ahead cache. */
   tdb_unique_ptr<ReadAheadCache> read_ahead_cache_;
 
+  /* The VFS configuration parameters. */
+  VFSParameters vfs_params_;
+
   /* ********************************* */
   /*          PRIVATE METHODS          */
   /* ********************************* */
@@ -674,7 +756,7 @@ class VFS {
    * @return Status
    */
   Status compute_read_batches(
-      const std::vector<std::tuple<uint64_t, void*, uint64_t>>& regions,
+      const std::vector<tuple<uint64_t, Tile*, uint64_t>>& regions,
       std::vector<BatchedRead>* batches) const;
 
   /**
@@ -715,22 +797,12 @@ class VFS {
       const bool use_read_ahead);
 
   /**
-   * Decrement the lock count of the given URI.
-   *
-   * @param uri The URI
-   * @param lock The filelock_t that is held, or INVALID_FILELOCK
-   * @return Status
-   */
-  Status decr_lock_count(const URI& uri, bool* is_zero, filelock_t* lock) const;
-
-  /**
    * Retrieves the backend-specific max number of parallel operations for VFS
    * read.
    */
   Status max_parallel_ops(const URI& uri, uint64_t* ops) const;
 };
 
-}  // namespace sm
-}  // namespace tiledb
+}  // namespace tiledb::sm
 
 #endif  // TILEDB_VFS_H

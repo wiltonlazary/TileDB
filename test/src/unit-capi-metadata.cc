@@ -30,12 +30,13 @@
  * Tests the C API for array metadata.
  */
 
-#include "test/src/helpers.h"
-#include "test/src/vfs_helpers.h"
+#include "test/support/src/helpers.h"
+#include "test/support/src/vfs_helpers.h"
 #include "tiledb/sm/c_api/tiledb.h"
 #include "tiledb/sm/c_api/tiledb_struct_def.h"
 #include "tiledb/sm/enums/encryption_type.h"
 #include "tiledb/sm/global_state/unit_test_config.h"
+#include "tiledb/sm/misc/tdb_time.h"
 
 #ifdef _WIN32
 #include "tiledb/sm/filesystem/win.h"
@@ -43,7 +44,7 @@
 #include "tiledb/sm/filesystem/posix.h"
 #endif
 
-#include <catch.hpp>
+#include <test/support/tdb_catch.h>
 #include <chrono>
 #include <iostream>
 #include <thread>
@@ -592,9 +593,9 @@ TEST_CASE_METHOD(
 
   // Check number of metadata files
   get_num_struct data = {0};
-  auto meta_folder =
-      array_name_ + "/" + tiledb::sm::constants::array_metadata_folder_name;
-  rc = tiledb_vfs_ls(ctx_, vfs_, meta_folder.c_str(), &get_meta_num, &data);
+  auto meta_dir =
+      array_name_ + "/" + tiledb::sm::constants::array_metadata_dir_name;
+  rc = tiledb_vfs_ls(ctx_, vfs_, meta_dir.c_str(), &get_meta_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 4);
 
@@ -628,7 +629,7 @@ TEST_CASE_METHOD(
 
   // Check number of metadata files
   data = {0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, meta_folder.c_str(), &get_meta_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, meta_dir.c_str(), &get_meta_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 1);
 

@@ -34,10 +34,11 @@
 #ifndef TILEDB_SINGLE_FRAGMENT_INFO_H
 #define TILEDB_SINGLE_FRAGMENT_INFO_H
 
+#include "tiledb/common/common.h"
 #include "tiledb/sm/enums/datatype.h"
+#include "tiledb/sm/filesystem/uri.h"
 #include "tiledb/sm/fragment/fragment_metadata.h"
 #include "tiledb/sm/misc/types.h"
-#include "tiledb/sm/misc/uri.h"
 
 #include <cinttypes>
 #include <sstream>
@@ -70,7 +71,7 @@ class SingleFragmentInfo {
       uint64_t fragment_size,
       const NDRange& non_empty_domain,
       const NDRange& expanded_non_empty_domain,
-      tdb_shared_ptr<FragmentMetadata> meta)
+      shared_ptr<FragmentMetadata> meta)
       : uri_(uri)
       , version_(meta->format_version())
       , sparse_(sparse)
@@ -151,7 +152,7 @@ class SingleFragmentInfo {
     return timestamp_range_;
   }
 
-  uint32_t format_version() const {
+  format_version_t format_version() const {
     return version_;
   }
 
@@ -176,8 +177,13 @@ class SingleFragmentInfo {
   }
 
   /** Returns a pointer to the fragment's metadata. */
-  tdb_shared_ptr<FragmentMetadata> meta() const {
+  shared_ptr<FragmentMetadata> meta() const {
     return meta_;
+  }
+
+  /** Returns the array schema name. */
+  const std::string& array_schema_name() const {
+    return array_schema_name_;
   }
 
   /** Returns the non-empty domain in string format. */
@@ -252,8 +258,8 @@ class SingleFragmentInfo {
              << ((int64_t*)non_empty_domain_[d].data())[1] << "]";
           break;
         case Datatype::STRING_ASCII:
-          ss << "[" << non_empty_domain_[d].start_str() << ", "
-             << non_empty_domain_[d].end_str() << "]";
+          ss << "[" << std::string(non_empty_domain_[d].start_str()) << ", "
+             << std::string(non_empty_domain_[d].end_str()) << "]";
           break;
         default:
           assert(false);
@@ -266,9 +272,19 @@ class SingleFragmentInfo {
     return ss.str();
   }
 
-  /** Returns the array schema name. */
-  const std::string& array_schema_name() const {
-    return array_schema_name_;
+  /** Accessor to the fragment size. */
+  uint64_t& fragment_size() {
+    return fragment_size_;
+  }
+
+  /** Accessor to the metadata pointer. */
+  shared_ptr<FragmentMetadata>& meta() {
+    return meta_;
+  }
+
+  /** Accessor to the metadata pointer. */
+  NDRange& non_empty_domain() {
+    return non_empty_domain_;
   }
 
  private:
@@ -276,7 +292,7 @@ class SingleFragmentInfo {
   URI uri_;
 
   /** The format version of the fragment. */
-  uint32_t version_;
+  format_version_t version_;
 
   /** True if the fragment is sparse, and false if it is dense. */
   bool sparse_;
@@ -308,7 +324,7 @@ class SingleFragmentInfo {
   std::string array_schema_name_;
 
   /** The fragment metadata. **/
-  tdb_shared_ptr<FragmentMetadata> meta_;
+  shared_ptr<FragmentMetadata> meta_;
 
   /**
    * Returns a deep copy of this FragmentInfo.

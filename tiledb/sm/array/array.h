@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -37,10 +37,16 @@
 #include <unordered_map>
 #include <vector>
 
+#include "tiledb/common/common.h"
+#include "tiledb/common/memory_tracker.h"
 #include "tiledb/common/status.h"
+#include "tiledb/sm/array/array_directory.h"
+#include "tiledb/sm/array/consistency.h"
+#include "tiledb/sm/array_schema/array_schema.h"
 #include "tiledb/sm/crypto/encryption_key.h"
 #include "tiledb/sm/fragment/fragment_info.h"
 #include "tiledb/sm/metadata/metadata.h"
+#include "tiledb/sm/storage_manager/storage_manager_declaration.h"
 
 using namespace tiledb::common;
 
@@ -50,12 +56,30 @@ namespace sm {
 class ArraySchema;
 class SchemaEvolution;
 class FragmentMetadata;
-class StorageManager;
 enum class QueryType : uint8_t;
+
+/**
+ * Free function that returns a reference to the ConsistencyController object.
+ */
+ConsistencyController& controller();
 
 /**
  * An array object to be opened for reads/writes. An ``Array`` instance
  * is associated with the timestamp it is opened at.
+ *
+ * @invariant is_opening_or_closing_ is false outside of the body of
+ * an open or close function.
+ *
+ * @invariant is_opening_or_closing_ is true when the class is either
+ * partially open or partially closed.
+ *
+ * @invariant atomicity must be maintained between the following:
+ * 1. an open Array.
+ * 2. the is_open_ flag.
+ * 3. the existence of a ConsistencySentry object, which represents
+ * open Array registration.
+ *
+ * @invariant mtx_ must not be locked outside of the scope of a member function.
  */
 class Array {
  public:
@@ -64,23 +88,54 @@ class Array {
   /* ********************************* */
 
   /** Constructor. */
-  Array(const URI& array_uri, StorageManager* storage_manager);
-
-  /** Copy constructor. */
-  Array(const Array& rhs);
+  Array(
+      const URI& array_uri,
+      StorageManager* storage_manager,
+      ConsistencyController& cc = controller());
 
   /** Destructor. */
   ~Array() = default;
+
+  DISABLE_COPY_AND_COPY_ASSIGN(Array);
+  DISABLE_MOVE_AND_MOVE_ASSIGN(Array);
 
   /* ********************************* */
   /*                API                */
   /* ********************************* */
 
-  /** Returns the array schema. */
-  ArraySchema* array_schema() const;
+  /** Returns the array directory object. */
+  const ArrayDirectory& array_directory() const;
+
+  /** Sets the latest array schema.
+   * @param array_schema The array schema to set.
+   */
+  void set_array_schema_latest(const shared_ptr<ArraySchema>& array_schema);
+
+  /** Returns the latest array schema. */
+  const ArraySchema& array_schema_latest() const;
+
+  /** Returns the latest array schema as a shared pointer. */
+  shared_ptr<const ArraySchema> array_schema_latest_ptr() const;
+
+  /** Returns array schemas map. */
+  inline const std::unordered_map<std::string, shared_ptr<ArraySchema>>&
+  array_schemas_all() const {
+    return array_schemas_all_;
+  }
+
+  /**
+   * Sets all array schemas.
+   * @param all_schemas The array schemas to set.
+   */
+  void set_array_schemas_all(
+      std::unordered_map<std::string, shared_ptr<ArraySchema>>& all_schemas);
 
   /** Returns the array URI. */
   const URI& array_uri() const;
+
+  /** Returns the serialized array URI, this is for backwards compatibility with
+   * serialization in pre TileDB 2.4 */
+  const URI& array_uri_serialized() const;
 
   /**
    * Opens the array for reading at a timestamp retrieved from the config
@@ -149,6 +204,28 @@ class Array {
   /** Closes the array and frees all memory. */
   Status close();
 
+  /**
+   * Deletes the Array data with given URI.
+   *
+   * @param uri The uri of the Array whose data is to be deleted.
+   *
+   * @pre The Array must be open for exclusive writes
+   */
+  void delete_array(const URI& uri);
+
+  /**
+   * Deletes the fragments from the Array with given URI.
+   *
+   * @param uri The uri of the Array whose fragments are to be deleted.
+   * @param timestamp_start The start timestamp at which to delete fragments.
+   * @param timestamp_end The end timestamp at which to delete fragments.
+   * @return Status
+   *
+   * @pre The Array must be open for exclusive writes
+   */
+  Status delete_fragments(
+      const URI& uri, uint64_t timestamp_start, uint64_t timstamp_end);
+
   /** Returns a constant pointer to the encryption key. */
   const EncryptionKey* encryption_key() const;
 
@@ -156,7 +233,7 @@ class Array {
    * Returns the fragment metadata of the array. If the array is not open,
    * an empty vector is returned.
    */
-  std::vector<tdb_shared_ptr<FragmentMetadata>> fragment_metadata() const;
+  std::vector<shared_ptr<FragmentMetadata>> fragment_metadata() const;
 
   /**
    * Returns `true` if the array is empty at the time it is opened.
@@ -165,16 +242,16 @@ class Array {
   bool is_empty() const;
 
   /** Returns `true` if the array is open. */
-  bool is_open() const;
+  bool is_open();
 
   /** Returns `true` if the array is remote */
   bool is_remote() const;
 
   /** Retrieves the array schema. Errors if the array is not open. */
-  Status get_array_schema(ArraySchema** array_schema) const;
+  tuple<Status, optional<shared_ptr<ArraySchema>>> get_array_schema() const;
 
-  /** Retrieves the query type. Errors if the array is not open. */
-  Status get_query_type(QueryType* qyery_type) const;
+  /** Retrieves the query type. Throws if the array is not open. */
+  QueryType get_query_type() const;
 
   /**
    * Returns the max buffer size given a fixed-sized attribute/dimension and
@@ -237,8 +314,9 @@ class Array {
   /** Retrieves a reference to the array config. */
   Config config() const;
 
-  /** Directly set the array URI. */
-  Status set_uri(const std::string& uri);
+  /** Directly set the array URI for serialized compatibility with pre
+   * TileDB 2.5 clients */
+  Status set_uri_serialized(const std::string& uri);
 
   /**
    * Deletes metadata from an array opened in WRITE mode.
@@ -321,49 +399,113 @@ class Array {
    * @note This is potentially an unsafe operation
    * it could have contention with locks from lazy loading of metadata.
    * This should only be used by the serialization class
-   * (tiledb/sm/serialization/array_schema.cc). In that class we need to fetch
-   * the underlying Metadata object to set the values we are loading from REST.
-   * A lock should already by taken before load_metadata is called.
+   * (tiledb/sm/serialization/array_schema_latest.cc). In that class we need to
+   * fetch the underlying Metadata object to set the values we are loading from
+   * REST. A lock should already by taken before load_metadata is called.
    */
-  Metadata* metadata();
+  Metadata* unsafe_metadata();
+
+  /** Set if array metadata is loaded already for this array or not */
+  inline void set_metadata_loaded(const bool is_loaded) {
+    metadata_loaded_ = is_loaded;
+  }
+
+  /** Check if array metadata is loaded already for this array or not */
+  inline bool& metadata_loaded() {
+    return metadata_loaded_;
+  }
+
+  /** Check if non emtpy domain is loaded already for this array or not */
+  inline bool& non_empty_domain_computed() {
+    return non_empty_domain_computed_;
+  }
 
   /** Returns the non-empty domain of the opened array.
    *  If the non_empty_domain has not been computed or loaded
    *  it will be loaded first
    * */
-  const NDRange& non_empty_domain();
+  tuple<Status, optional<const NDRange>> non_empty_domain();
+
+  /**
+   * Retrieves the array metadata object that is already loadad.
+   * If it's not yet loaded it will be empty.
+   */
+  NDRange* loaded_non_empty_domain();
 
   /** Returns the non-empty domain of the opened array. */
   void set_non_empty_domain(const NDRange& non_empty_domain);
+
+  /** Set if the non_empty_domain is computed already for this array or not */
+  inline void set_non_empty_domain_computed(const bool is_computed) {
+    non_empty_domain_computed_ = is_computed;
+  }
+
+  /** Returns the memory tracker. */
+  MemoryTracker* memory_tracker();
+
+  /** Checks the config to see if non empty domain should be serialized on array
+   * open. */
+  bool serialize_non_empty_domain() const;
+
+  /** Checks the config to see if metadata should be serialized on array open.
+   */
+  bool serialize_metadata() const;
+
+  /** Checks the config to see if refactored array open should be used. */
+  bool use_refactored_array_open() const;
+
+  /** Set the query type to open the array for. */
+  inline void set_query_type(QueryType query_type) {
+    query_type_ = query_type;
+  }
 
  private:
   /* ********************************* */
   /*         PRIVATE ATTRIBUTES        */
   /* ********************************* */
 
-  /** The array schema. */
-  ArraySchema* array_schema_;
+  /** The latest array schema. */
+  shared_ptr<ArraySchema> array_schema_latest_;
+
+  /**
+   * A map of all array_schemas_all
+   */
+  std::unordered_map<std::string, shared_ptr<ArraySchema>> array_schemas_all_;
 
   /** The array URI. */
   URI array_uri_;
 
+  /** The array directory object for listing URIs. */
+  ArrayDirectory array_dir_;
+
+  /** This is a backwards compatible URI from serialization
+   *  In TileDB 2.5 we removed sending the URI but 2.4 and older were
+   * unconditionally setting the URI, so things got set to an empty stirng Now
+   * we store the serialized URI so we avoid the empty string with older
+   * clients.
+   */
+  URI array_uri_serialized_;
+
   /**
    * The private encryption key used to encrypt the array.
    *
-   * Note: This is the only place in TileDB where the user's private key bytes
-   * should be stored. Whenever a key is needed, a pointer to this memory region
-   * should be passed instead of a copy of the bytes.
+   * Note: This is the only place in TileDB where the user's private key
+   * bytes should be stored. Whenever a key is needed, a pointer to this
+   * memory region should be passed instead of a copy of the bytes.
    */
-  tdb_shared_ptr<EncryptionKey> encryption_key_;
+  shared_ptr<EncryptionKey> encryption_key_;
 
   /** The metadata of the fragments the array was opened with. */
-  std::vector<tdb_shared_ptr<FragmentMetadata>> fragment_metadata_;
+  std::vector<shared_ptr<FragmentMetadata>> fragment_metadata_;
 
   /** `True` if the array has been opened. */
   std::atomic<bool> is_open_;
 
-  /** The query type the array was opened for. */
-  QueryType query_type_;
+  /** `True` if the array is currently in the process of opening or closing. */
+  std::atomic<bool> is_opening_or_closing_;
+
+  /** The query type the array was opened for. Default: READ */
+  QueryType query_type_ = QueryType::READ;
 
   /**
    * The starting timestamp between to open `open_array_` at.
@@ -405,9 +547,6 @@ class Array {
    */
   std::vector<uint8_t> last_max_buffer_sizes_subarray_;
 
-  /** Mutex for thread-safety. */
-  mutable std::mutex mtx_;
-
   /** True if the array is remote (has `tiledb://` URI scheme). */
   bool remote_;
 
@@ -422,6 +561,21 @@ class Array {
 
   /** The non-empty domain of the array. */
   NDRange non_empty_domain_;
+
+  /** Memory tracker for the array. */
+  MemoryTracker memory_tracker_;
+
+  /** A reference to the object which controls the present Array instance. */
+  ConsistencyController& consistency_controller_;
+
+  /** Lifespan maintenance of an open array in the ConsistencyController. */
+  std::optional<ConsistencySentry> consistency_sentry_;
+
+  /**
+   * Mutex that protects atomicity between the existence of the
+   * ConsistencySentry registration and the is_open_ flag.
+   */
+  std::mutex mtx_;
 
   /* ********************************* */
   /*          PRIVATE METHODS          */
@@ -469,6 +623,19 @@ class Array {
 
   /** Computes the non-empty domain of the array. */
   Status compute_non_empty_domain();
+
+  /**
+   * Sets the array state as open.
+   *
+   * @param query_type The QueryType of the Array.
+   */
+  void set_array_open(const QueryType& query_type);
+
+  /** Sets the array state as closed.
+   *
+   * Note: the Sentry object will also be released upon Array destruction.
+   **/
+  void set_array_closed();
 };
 
 }  // namespace sm

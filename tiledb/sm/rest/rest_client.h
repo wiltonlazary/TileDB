@@ -36,8 +36,10 @@
 #include <string>
 #include <unordered_map>
 
+#include "tiledb/common/logger_public.h"
 #include "tiledb/common/status.h"
 #include "tiledb/common/thread_pool.h"
+#include "tiledb/sm/group/group.h"
 #include "tiledb/sm/serialization/query.h"
 #include "tiledb/sm/stats/stats.h"
 
@@ -59,19 +61,50 @@ class RestClient {
 
   /** Initialize the REST client with the given config. */
   Status init(
-      stats::Stats* parent_stats, const Config* config, ThreadPool* compute_tp);
+      stats::Stats* parent_stats,
+      const Config* config,
+      ThreadPool* compute_tp,
+      const std::shared_ptr<Logger>& logger);
 
   /** Sets a header that will be attached to all requests. */
   Status set_header(const std::string& name, const std::string& value);
 
   /**
-   * Get a data encoded array schema from rest server
+   * Check if an array exists by making a REST call. To start with this fetches
+   * the schema but ignores the body returned if non-error
+   *
+   * @param uri to check
+   * @return tuple of Status and if array exists
+   */
+  tuple<Status, std::optional<bool>> check_array_exists_from_rest(
+      const URI& uri);
+
+  /**
+   * Check if an group exists by making a REST call. To start with this fetches
+   * the schema but ignores the body returned if non-error
+   *
+   * @param uri to check
+   * @return tuple of Status and if group exists
+   */
+  tuple<Status, std::optional<bool>> check_group_exists_from_rest(
+      const URI& uri);
+
+  /**
+   * Get a data encoded array schema from rest server.
    *
    * @param uri of array being loaded
-   * @param array_schema array schema to send to server
-   * @return Status Ok() on success Error() on failures
+   * @return Status and new ArraySchema shared pointer.
    */
-  Status get_array_schema_from_rest(const URI& uri, ArraySchema** array_schema);
+  tuple<Status, optional<shared_ptr<ArraySchema>>> get_array_schema_from_rest(
+      const URI& uri);
+
+  /**
+   * Post the array config and get an array from rest server
+   *
+   * @param uri of array being loaded
+   * @param array array to load into
+   */
+  Status post_array_from_rest(const URI& uri, Array* array);
 
   /**
    * Post a data array schema to rest server
@@ -80,7 +113,16 @@ class RestClient {
    * @param array_schema array schema to load into
    * @return Status Ok() on success Error() on failures
    */
-  Status post_array_schema_to_rest(const URI& uri, ArraySchema* array_schema);
+  Status post_array_schema_to_rest(
+      const URI& uri, const ArraySchema& array_schema);
+
+  /**
+   * Deletes all written data from array at the given URI from the REST server.
+   *
+   * #TODO Implement API endpoint on TileDBCloud.
+   * @param uri Array URI to delete
+   */
+  void delete_array_from_rest(const URI& uri);
 
   /**
    * Deregisters an array at the given URI from the REST server.
@@ -112,7 +154,7 @@ class RestClient {
    */
   Status get_array_max_buffer_sizes(
       const URI& uri,
-      const ArraySchema* schema,
+      const ArraySchema& schema,
       const void* subarray,
       std::unordered_map<std::string, std::pair<uint64_t, uint64_t>>*
           buffer_sizes);
@@ -137,10 +179,16 @@ class RestClient {
    * Posts the array's metadata to the REST server.
    *
    * @param uri Array URI
+   * @param timestamp_start Inclusive starting timestamp at which to open array
+   * @param timestamp_end Inclusive ending timestamp at which to open array
    * @param array Array to update/post metadata for.
    * @return Status
    */
-  Status post_array_metadata_to_rest(const URI& uri, Array* array);
+  Status post_array_metadata_to_rest(
+      const URI& uri,
+      uint64_t timestamp_start,
+      uint64_t timestamp_end,
+      Array* array);
 
   /**
    * Post a data query to rest server
@@ -161,6 +209,16 @@ class RestClient {
   Status finalize_query_to_rest(const URI& uri, Query* query);
 
   /**
+   * Submit and finalize a query to rest server. Used in global order
+   * writes to submit the last tile-unaligned chunk and finalize the query.
+   *
+   * @param uri of array being queried
+   * @param query to send to server and store results in
+   * @return Status Ok() on success Error() on failures
+   */
+  Status submit_and_finalize_query_to_rest(const URI& uri, Query* query);
+
+  /**
    * Get array's non_empty domain from rest server
    *
    * @param array Array model to fetch and set non empty domain on
@@ -177,6 +235,62 @@ class RestClient {
    */
   Status post_array_schema_evolution_to_rest(
       const URI& uri, ArraySchemaEvolution* array_schema_evolution);
+
+  /**
+   * Get array's fragment info from rest server
+   *
+   * @param uri Array uri to query for
+   * @param fragment_info Fragment info object to store the incoming info
+   * @return Status Ok() on success Error() on failures
+   */
+  Status post_fragment_info_from_rest(
+      const URI& uri, FragmentInfo* fragment_info);
+
+  /**
+   * Gets the group's metadata from the REST server (and updates the in-memory
+   * Metadata of the group to match the returned values).
+   *
+   * @param uri Group URI
+   * @param group Group to fetch metadata for
+   * @return Status
+   */
+  Status post_group_metadata_from_rest(const URI& uri, Group* group);
+
+  /**
+   * Posts the group's metadata to the REST server.
+   *
+   * @param uri Group URI
+   * @param group Group to update/post metadata for.
+   * @return Status
+   */
+  Status put_group_metadata_to_rest(const URI& uri, Group* group);
+
+  /**
+   * Get group details from the REST server.
+   *
+   * @param uri Group UI
+   * @param group Group to deserialize into
+   * @return Status
+   */
+  Status post_group_from_rest(const URI& uri, Group* group);
+
+  /**
+   * Post group details to the REST server.
+   *
+   * @param uri Group UI
+   * @param group Group to serialize
+   * @return Status
+   */
+  Status patch_group_to_rest(const URI& uri, Group* group);
+
+  /**
+   * Post group create to the REST server.
+   *
+   * @param uri Group UI
+   * @param group Group to create
+   * @return Status
+   */
+  Status post_group_create_to_rest(const URI& uri, Group* group);
 
  private:
   /* ********************************* */
@@ -217,6 +331,12 @@ class RestClient {
 
   /** Mutex for thread-safety. */
   mutable std::mutex redirect_mtx_;
+
+  /** The class logger. */
+  shared_ptr<Logger> logger_;
+
+  /** UID of the logger instance */
+  inline static std::atomic<uint64_t> logger_id_ = 0;
 
   /* ********************************* */
   /*         PRIVATE METHODS           */
@@ -264,12 +384,12 @@ class RestClient {
    *    map is updated accordingly.
    * @return Number of acknowledged bytes
    */
-  size_t post_data_write_cb(
-      bool reset,
-      void* contents,
-      size_t content_nbytes,
-      bool* skip_retries,
-      Buffer* scratch,
+  size_t query_post_call_back(
+      const bool reset,
+      void* constcontents,
+      const size_t content_nbytes,
+      bool* constskip_retries,
+      shared_ptr<Buffer> scratch,
       Query* query,
       serialization::CopyState* copy_state);
 
@@ -284,7 +404,7 @@ class RestClient {
    * @return Status
    */
   static Status subarray_to_str(
-      const ArraySchema* schema,
+      const ArraySchema& schema,
       const void* subarray,
       std::string* subarray_str);
 
@@ -308,6 +428,15 @@ class RestClient {
    * @return Returns the redirection URI if exists and empty string otherwise
    */
   std::string redirect_uri(const std::string& cache_key);
+
+  /**
+   * Cap'n proto requires JSON messages to be null terminated c-style strings.
+   * This function checks if using JSON that returned buffers are null delimited
+   *
+   * @param buffer of server message
+   * @return Status
+   */
+  Status ensure_json_null_delimited_string(Buffer* buffer);
 };
 
 }  // namespace sm

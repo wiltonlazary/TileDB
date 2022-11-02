@@ -35,6 +35,17 @@
 #ifndef TILEDB_CPP_H
 #define TILEDB_CPP_H
 
+#ifdef TILEDB_NO_API_DEPRECATION_WARNINGS
+// Define these before including tiledb_export.h to avoid their normal
+// definitions.
+#ifndef TILEDB_DEPRECATED
+#define TILEDB_DEPRECATED
+#endif
+#ifndef TILEDB_DEPRECATED_EXPORT
+#define TILEDB_DEPRECATED_EXPORT
+#endif
+#endif
+
 #include "array.h"
 #include "array_schema.h"
 #include "attribute.h"
@@ -43,6 +54,7 @@
 #include "deleter.h"
 #include "dimension.h"
 #include "domain.h"
+#include "error.h"
 #include "exception.h"
 #include "filter.h"
 #include "filter_list.h"
@@ -54,6 +66,7 @@
 #include "query_condition.h"
 #include "schema_base.h"
 #include "stats.h"
+#include "subarray.h"
 #include "tiledb.h"
 #include "utils.h"
 #include "version.h"

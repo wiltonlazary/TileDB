@@ -31,8 +31,12 @@
  * Tests of backwards compatibility for opening/reading arrays.
  */
 
-#include "catch.hpp"
+#include <test/support/tdb_catch.h>
+#include "test/support/src/helpers.h"
+#include "test/support/src/serialization_wrappers.h"
+#include "tiledb/common/common.h"
 #include "tiledb/sm/cpp_api/tiledb"
+#include "tiledb/sm/misc/constants.h"
 
 #include <chrono>
 #include <iostream>
@@ -40,6 +44,7 @@
 #include <thread>
 
 using namespace tiledb;
+using namespace tiledb::test;
 
 namespace {
 
@@ -128,16 +133,10 @@ TEST_CASE(
     "[backwards-compat]") {
   Context ctx;
   std::string array_uri(arrays_dir + "/dense_array_v1_3_0");
-  try {
-    Array array(ctx, array_uri, TILEDB_READ);
-    REQUIRE(false);
-  } catch (const TileDBError& e) {
-    // Check correct exception type and error message.
-    std::string msg(e.what());
-    REQUIRE(msg.find("Error: Read buffer overflow") != std::string::npos);
-  } catch (const std::exception& e) {
-    REQUIRE(false);
-  }
+  REQUIRE_THROWS_WITH(
+      Array(ctx, array_uri, TILEDB_READ),
+      "[TileDB::Array] Error: [TileDB::StorageManager] Error: Reading data "
+      "past end of serialized data size.");
 }
 
 template <typename T>
@@ -149,9 +148,8 @@ void set_buffer_wrapper(
     uint64_t* const offsets,
     void* const values,
     uint8_t* const validity,
-    std::unordered_map<
-        std::string,
-        std::tuple<uint64_t*, void*, uint8_t*>>* const buffers) {
+    std::unordered_map<std::string, tuple<uint64_t*, void*, uint8_t*>>* const
+        buffers) {
   if (var_sized) {
     if (!nullable) {
       query->set_data_buffer(attribute_name, static_cast<T*>(values), 1);
@@ -197,10 +195,16 @@ TEST_CASE(
       .set_data_buffer("a", a_read)
       .set_coordinates(coords_read);
   query_r.submit();
-  array.close();
 
+  // Note: If you encounter a failure here, in particular with a_read[0] == 100
+  // (instead of 1), be sure non_split_coords_v1_4_0 has not become 'corrupt',
+  // possibly from a previous aborted run, as there is also a test elsewhere
+  // which expects a_read[0] == 100, if non_split_coords_v1_4_0 may have become
+  // corrupt can refresh from repository to correct initial state.
   for (int i = 0; i < 4; i++)
     REQUIRE(a_read[i] == i + 1);
+
+  array.close();
 }
 
 TEST_CASE(
@@ -255,7 +259,7 @@ TEST_CASE(
 
       auto query = new Query(encrypted ? ctx_cfg : ctx, *array);
 
-      std::unordered_map<std::string, std::tuple<uint64_t*, void*, uint8_t*>>
+      std::unordered_map<std::string, tuple<uint64_t*, void*, uint8_t*>>
           buffers;
       for (auto attr : array->schema().attributes()) {
         std::string attribute_name = attr.first;
@@ -266,6 +270,18 @@ TEST_CASE(
         uint8_t* validity = static_cast<uint8_t*>(malloc(sizeof(uint8_t)));
 
         switch (attr.second.type()) {
+          case TILEDB_BLOB: {
+            set_buffer_wrapper<std::byte>(
+                query,
+                attribute_name,
+                var_sized,
+                nullable,
+                offsets,
+                values,
+                validity,
+                &buffers);
+            break;
+          }
           case TILEDB_INT8: {
             set_buffer_wrapper<int8_t>(
                 query,
@@ -278,6 +294,7 @@ TEST_CASE(
                 &buffers);
             break;
           }
+          case TILEDB_BOOL:
           case TILEDB_UINT8: {
             set_buffer_wrapper<uint8_t>(
                 query,
@@ -548,17 +565,24 @@ TEST_CASE(
 
       // Check the results to make sure all values are set to 1
       for (auto buff : buffers) {
-        std::tuple<uint64_t*, void*, uint8_t*> buffer = buff.second;
+        tuple<uint64_t*, void*, uint8_t*> buffer = buff.second;
         if (std::get<0>(buffer) != nullptr) {
           REQUIRE(std::get<0>(buffer)[0] == 0);
         }
 
         Attribute attribute = array->schema().attribute(buff.first);
         switch (attribute.type()) {
+          case TILEDB_BLOB: {
+            REQUIRE(
+                static_cast<std::byte*>(std::get<1>(buffer))[0] ==
+                static_cast<std::byte>(1));
+            break;
+          }
           case TILEDB_INT8: {
             REQUIRE(static_cast<int8_t*>(std::get<1>(buffer))[0] == 1);
             break;
           }
+          case TILEDB_BOOL:
           case TILEDB_UINT8: {
             REQUIRE(static_cast<uint8_t*>(std::get<1>(buffer))[0] == 1);
             break;
@@ -655,6 +679,10 @@ TEST_CASE(
 TEST_CASE(
     "Backwards compatibility: Write to an array of older version",
     "[backwards-compat][write-to-older-version]") {
+  if constexpr (is_experimental_build) {
+    return;
+  }
+
   std::string old_array_name(arrays_dir + "/non_split_coords_v1_4_0");
   Context ctx;
   std::string fragment_uri;
@@ -669,7 +697,6 @@ TEST_CASE(
         .set_data_buffer("a", a_write)
         .set_coordinates(coords_write);
     query_w.submit();
-    fragment_uri = query_w.fragment_uri(0);
     old_array.close();
 
     // Read
@@ -688,14 +715,16 @@ TEST_CASE(
 
     // Remove created fragment and ok file
     VFS vfs(ctx);
-    vfs.remove_dir(fragment_uri);
-    vfs.remove_file(fragment_uri + ".ok");
+    vfs.remove_dir(get_fragment_dir(old_array_name));
+    vfs.remove_dir(get_commit_dir(old_array_name));
 
     REQUIRE(a_read[0] == 100);
     for (int i = 1; i < 4; i++) {
       REQUIRE(a_read[i] == i + 1);
     }
   } catch (const std::exception& e) {
+    std::cerr << "Unexpected exception in unit-backwards_compat: " << e.what()
+              << std::endl;
     CHECK(false);
   }
 }
@@ -731,7 +760,7 @@ TEST_CASE(
 
       auto query = new Query(encrypted ? ctx_cfg : ctx, *array);
 
-      std::unordered_map<std::string, std::tuple<uint64_t*, void*, uint8_t*>>
+      std::unordered_map<std::string, tuple<uint64_t*, void*, uint8_t*>>
           buffers;
       for (auto attr : array->schema().attributes()) {
         std::string attribute_name = attr.first;
@@ -740,6 +769,18 @@ TEST_CASE(
         uint8_t* validity = static_cast<uint8_t*>(malloc(sizeof(uint8_t)));
 
         switch (attr.second.type()) {
+          case TILEDB_BLOB: {
+            set_buffer_wrapper<std::byte>(
+                query,
+                attribute_name,
+                attr.second.variable_sized(),
+                attr.second.nullable(),
+                offsets,
+                values,
+                validity,
+                &buffers);
+            break;
+          }
           case TILEDB_INT8: {
             set_buffer_wrapper<int8_t>(
                 query,
@@ -752,6 +793,7 @@ TEST_CASE(
                 &buffers);
             break;
           }
+          case TILEDB_BOOL:
           case TILEDB_UINT8: {
             set_buffer_wrapper<uint8_t>(
                 query,
@@ -1058,17 +1100,24 @@ TEST_CASE(
 
       // Check the results to make sure all values are set to 1
       for (auto buff : buffers) {
-        std::tuple<uint64_t*, void*, uint8_t*> buffer = buff.second;
+        tuple<uint64_t*, void*, uint8_t*> buffer = buff.second;
         if (std::get<0>(buffer) != nullptr) {
           REQUIRE(std::get<0>(buffer)[0] == 0);
         }
 
         Attribute attribute = array->schema().attribute(buff.first);
         switch (attribute.type()) {
+          case TILEDB_BLOB: {
+            REQUIRE(
+                static_cast<std::byte*>(std::get<1>(buffer))[0] ==
+                static_cast<std::byte>(1));
+            break;
+          }
           case TILEDB_INT8: {
             REQUIRE(static_cast<int8_t*>(std::get<1>(buffer))[0] == 1);
             break;
           }
+          case TILEDB_BOOL:
           case TILEDB_UINT8: {
             REQUIRE(static_cast<uint8_t*>(std::get<1>(buffer))[0] == 1);
             break;
@@ -1167,4 +1216,140 @@ TEST_CASE(
       delete array;
     }
   }
+}
+
+TEST_CASE(
+    "Backwards compatibility: Upgrades an array of older version and "
+    "write/read it",
+    "[backwards-compat][upgrade-version][write-read-new-version]") {
+  bool serialized_writes = false;
+  SECTION("no serialization") {
+    serialized_writes = false;
+  }
+#ifdef TILEDB_SERIALIZATION
+  SECTION("serialization enabled global order write") {
+    serialized_writes = true;
+  }
+#endif
+
+  std::string array_name(arrays_dir + "/non_split_coords_v1_4_0");
+  Context ctx;
+  std::string schema_folder;
+  std::string fragment_uri;
+
+  // Upgrades version
+  Array::upgrade_version(ctx, array_name);
+
+  // Read using upgraded version
+  Array array_read1(ctx, array_name, TILEDB_READ);
+  std::vector<int> subarray_read1 = {1, 4, 10, 10};
+  std::vector<int> a_read1;
+  a_read1.resize(4);
+  std::vector<int> d1_read1;
+  d1_read1.resize(4);
+  std::vector<int> d2_read1;
+  d2_read1.resize(4);
+
+  Query query_read1(ctx, array_read1);
+  query_read1.set_subarray(subarray_read1)
+      .set_layout(TILEDB_ROW_MAJOR)
+      .set_data_buffer("a", a_read1)
+      .set_data_buffer("d1", d1_read1)
+      .set_data_buffer("d2", d2_read1);
+
+  query_read1.submit();
+  array_read1.close();
+
+  for (int i = 0; i < 4; i++) {
+    REQUIRE(a_read1[i] == i + 1);
+  }
+
+  // Write
+  Array array_write(ctx, array_name, TILEDB_WRITE);
+  std::vector<int> subarray_write = {1, 2, 10, 10};
+  std::vector<int> a_write = {11, 12};
+  std::vector<int> d1_write = {1, 2};
+  std::vector<int> d2_write = {10, 10};
+
+  Query query_write(ctx, array_write, TILEDB_WRITE);
+
+  query_write.set_layout(TILEDB_GLOBAL_ORDER);
+  query_write.set_data_buffer("a", a_write);
+  query_write.set_data_buffer("d1", d1_write);
+  query_write.set_data_buffer("d2", d2_write);
+
+  if (!serialized_writes) {
+    query_write.submit();
+    query_write.finalize();
+  } else {
+    submit_and_finalize_serialized_query(ctx, query_write);
+  }
+
+  array_write.close();
+
+  FragmentInfo fragment_info(ctx, array_name);
+  fragment_info.load();
+
+  bool serialized_load = false;
+  SECTION("no serialization") {
+    serialized_load = false;
+  }
+#ifdef TILEDB_SERIALIZATION
+  SECTION("serialization enabled fragment info load") {
+    serialized_load = true;
+  }
+#endif
+
+  if (serialized_load) {
+    FragmentInfo deserialized_fragment_info(ctx, array_name);
+    tiledb_fragment_info_serialize(
+        ctx.ptr().get(),
+        array_name.c_str(),
+        fragment_info.ptr().get(),
+        deserialized_fragment_info.ptr().get(),
+        tiledb_serialization_type_t(0));
+    fragment_info = deserialized_fragment_info;
+  }
+
+  fragment_uri = fragment_info.fragment_uri(1);
+
+  // old version fragment
+  CHECK(fragment_info.version(0) == 1);
+  // new version fragment
+  CHECK(fragment_info.version(1) == tiledb::sm::constants::format_version);
+
+  // Read again
+  Array array_read2(ctx, array_name, TILEDB_READ);
+  std::vector<int> subarray_read2 = {1, 4, 10, 10};
+  std::vector<int> a_read2;
+  a_read2.resize(4);
+  std::vector<int> d1_read2;
+  d1_read2.resize(4);
+  std::vector<int> d2_read2;
+  d2_read2.resize(4);
+
+  Query query_read2(ctx, array_read2);
+  query_read2.set_subarray(subarray_read2)
+      .set_layout(TILEDB_ROW_MAJOR)
+      .set_data_buffer("a", a_read2)
+      .set_data_buffer("d1", d1_read2)
+      .set_data_buffer("d2", d2_read2);
+
+  query_read2.submit();
+  array_read2.close();
+
+  for (int i = 0; i < 2; i++) {
+    REQUIRE(a_read2[i] == i + 11);
+  }
+  for (int i = 2; i < 3; i++) {
+    REQUIRE(a_read2[i] == i + 1);
+  }
+
+  // Clean up
+  schema_folder = array_read2.uri() + "/__schema";
+
+  VFS vfs(ctx);
+  vfs.remove_dir(get_fragment_dir(array_read2.uri()));
+  vfs.remove_dir(get_commit_dir(array_read2.uri()));
+  vfs.remove_dir(schema_folder);
 }

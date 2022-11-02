@@ -38,9 +38,9 @@
 #include <sstream>
 #include <thread>
 
-#include "catch.hpp"
-#include "test/src/helpers.h"
-#include "test/src/vfs_helpers.h"
+#include <test/support/tdb_catch.h>
+#include "test/support/src/helpers.h"
+#include "test/support/src/vfs_helpers.h"
 #ifdef _WIN32
 #include "tiledb/sm/filesystem/win.h"
 #else
@@ -674,7 +674,7 @@ TEST_CASE_METHOD(
   tiledb_array_t* rarray;
   rc = tiledb_query_get_array(ctx_, query, &rarray);
   REQUIRE(rc == TILEDB_OK);
-  CHECK(rarray->array_ != array->array_);
+  CHECK(rarray->array_ == array->array_);
 
   tiledb_array_schema_t* rschema;
   rc = tiledb_array_get_schema(ctx_, rarray, &rschema);

@@ -34,6 +34,7 @@
 #define TILEDB_S3_H
 
 #ifdef HAVE_S3
+#include "tiledb/common/common.h"
 #include "tiledb/common/rwlock.h"
 #include "tiledb/common/status.h"
 #include "tiledb/common/thread_pool.h"
@@ -41,9 +42,9 @@
 #include "tiledb/sm/config/config.h"
 #include "tiledb/sm/filesystem/s3_thread_pool_executor.h"
 #include "tiledb/sm/misc/constants.h"
-#include "tiledb/sm/misc/uri.h"
 #include "tiledb/sm/stats/global_stats.h"
 #include "tiledb/sm/stats/stats.h"
+#include "uri.h"
 
 #include <aws/core/Aws.h>
 #include <aws/core/auth/AWSCredentialsProviderChain.h>
@@ -80,6 +81,11 @@
 using namespace tiledb::common;
 
 namespace tiledb {
+
+namespace common::filesystem {
+class directory_entry;
+}
+
 namespace sm {
 
 /**
@@ -87,6 +93,10 @@ namespace sm {
  * maintains buffer caches for writing into the various attribute files.
  */
 class S3 {
+ private:
+  /** Forward declaration */
+  struct MultiPartUploadState;
+
  public:
   /* ********************************* */
   /*     CONSTRUCTORS & DESTRUCTORS    */
@@ -213,6 +223,21 @@ class S3 {
   Status ls(
       const URI& prefix,
       std::vector<std::string>* paths,
+      const std::string& delimiter = "/",
+      int max_paths = -1) const;
+
+  /**
+   *
+   * Lists objects and object information that start with `prefix`.
+   *
+   * @param prefix The parent path to list sub-paths.
+   * @param delimiter The uri is truncated to the first delimiter
+   * @param max_paths The maximum number of paths to be retrieved
+   * @return A list of directory_entry objects
+   */
+  tuple<Status, optional<std::vector<filesystem::directory_entry>>>
+  ls_with_sizes(
+      const URI& prefix,
       const std::string& delimiter = "/",
       int max_paths = -1) const;
 
@@ -344,6 +369,17 @@ class S3 {
    */
   Status write(const URI& uri, const void* buffer, uint64_t length);
 
+  /**
+   * Used in serialization of global order writes to set the multipart upload
+   * state in multipart_upload_states_ during deserialization
+   *
+   * @param uri The file uri used as key in the internal map
+   * @param state The multipart upload state info
+   * @return Status
+   */
+  Status set_multipart_upload_state(
+      const std::string& uri, S3::MultiPartUploadState& state);
+
  private:
   /* ********************************* */
   /*         PRIVATE DATATYPES         */
@@ -436,20 +472,36 @@ class S3 {
    */
   struct MakeUploadPartCtx {
     /** Constructor. */
+    MakeUploadPartCtx()
+        : upload_part_num(0){};
     MakeUploadPartCtx(
-        Aws::S3::Model::UploadPartOutcomeCallable&&
-            in_upload_part_outcome_callable,
+        Aws::S3::Model::UploadPartOutcome&& in_upload_part_outcome,
         const int in_upload_part_num)
-        : upload_part_outcome_callable(
-              std::move(in_upload_part_outcome_callable))
+        : upload_part_outcome(std::move(in_upload_part_outcome))
         , upload_part_num(in_upload_part_num) {
     }
 
+    /** Move Constructor */
+    MakeUploadPartCtx(MakeUploadPartCtx&& other) noexcept {
+      this->upload_part_outcome = std::move(other.upload_part_outcome);
+      this->upload_part_num = other.upload_part_num;
+    }
+
+    /** Move assignment operator */
+    MakeUploadPartCtx& operator=(MakeUploadPartCtx&& other) {
+      this->upload_part_outcome = std::move(other.upload_part_outcome);
+      this->upload_part_num = other.upload_part_num;
+      return *this;
+    }
+
+    /** Copy Constructor **/
+    MakeUploadPartCtx(const MakeUploadPartCtx& other) = delete;
+
     /** The AWS future to wait on for a pending upload part request. */
-    Aws::S3::Model::UploadPartOutcomeCallable upload_part_outcome_callable;
+    Aws::S3::Model::UploadPartOutcome upload_part_outcome;
 
     /** The part number of the pending upload part request. */
-    const int upload_part_num;
+    int upload_part_num;
   };
 
   /** Contains all state associated with a multipart upload transaction. */
@@ -562,11 +614,10 @@ class S3 {
    * The lazily-initialized S3 client. This is mutable so that nominally const
    * functions can call init_client().
    */
-  mutable tdb_shared_ptr<Aws::S3::S3Client> client_;
+  mutable shared_ptr<Aws::S3::S3Client> client_;
 
   /** The AWS credetial provider. */
-  mutable tdb_shared_ptr<Aws::Auth::AWSCredentialsProvider>
-      credentials_provider_;
+  mutable shared_ptr<Aws::Auth::AWSCredentialsProvider> credentials_provider_;
 
   /**
    * Mutex protecting client initialization. This is mutable so that nominally
@@ -578,7 +629,7 @@ class S3 {
   mutable tdb_unique_ptr<Aws::Client::ClientConfiguration> client_config_;
 
   /** The executor used by 'client_'. */
-  mutable std::shared_ptr<S3ThreadPoolExecutor> s3_tp_executor_;
+  mutable shared_ptr<S3ThreadPoolExecutor> s3_tp_executor_;
 
   /** The size of the file buffers used in multipart uploads. */
   uint64_t file_buffer_size_;
@@ -591,7 +642,7 @@ class S3 {
       multipart_upload_states_;
 
   /** Protects 'multipart_upload_states_'. */
-  RWLock multipart_upload_rwlock_;
+  mutable RWLock multipart_upload_rwlock_;
 
   /** The maximum number of parallel operations issued. */
   uint64_t max_parallel_ops_;
@@ -634,6 +685,8 @@ class S3 {
 
   /** If !NOT_SET assign to bucket requests supporting SetACL() */
   Aws::S3::Model::BucketCannedACL bucket_canned_acl_;
+
+  friend class VFS;
 
   /* ********************************* */
   /*          PRIVATE METHODS          */
@@ -836,6 +889,15 @@ class S3 {
    */
   Status get_make_upload_part_req(
       const URI& uri, const std::string& uri_path, MakeUploadPartCtx& ctx);
+
+  /**
+   * Returns the multipart upload state identified by uri
+   *
+   * @param uri The URI of the multipart state
+   * @return an optional MultiPartUploadState object
+   */
+  std::optional<S3::MultiPartUploadState> multipart_upload_state(
+      const URI& uri);
 };
 
 }  // namespace sm

@@ -30,12 +30,12 @@
  * Tests for the TileDB Arrow integration.
  */
 
-#include "catch.hpp"
-#include "helpers.h"
+#include <test/support/tdb_catch.h>
+#include "test/support/src/helpers.h"
 #include "tiledb/sm/cpp_api/arrowio"
 #include "tiledb/sm/cpp_api/tiledb"
+#include "tiledb/sm/filesystem/uri.h"
 #include "tiledb/sm/misc/constants.h"
-#include "tiledb/sm/misc/uri.h"
 #include "tiledb/sm/misc/utils.h"
 
 #include <pybind11/embed.h>
@@ -331,7 +331,7 @@ void test_for_column_size(size_t col_size) {
       // structured binding with MSVC 15
       // https://developercommunity.visualstudio.com/t/structured-bindings-with-auto-is-incorrectly-const/562665
       auto [offsets_nelem, data_nelem, validity_nelem] =
-          std::tuple<uint64_t, uint64_t, uint64_t>(res);
+          tuple<uint64_t, uint64_t, uint64_t>(res);
 
       // fake an empty result set, which is not otherwise possible with
       // a dense array. test for ch10191
@@ -384,6 +384,10 @@ void test_for_column_size(size_t col_size) {
           pa_name.c_str(),
           static_cast<void*>(vec_array.at(i)),
           static_cast<void*>(vec_schema.at(i)));
+
+      // Currently we do not export any metadata. Ensure
+      // that the field is null as it should be. SC-11522
+      CHECK(vec_schema.at(i)->metadata == nullptr);
 
       ds_import(
           pa_name,

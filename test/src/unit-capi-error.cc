@@ -31,7 +31,7 @@
  * Tests for the C API error return code.
  */
 
-#include "catch.hpp"
+#include <test/support/tdb_catch.h>
 #include "tiledb/sm/c_api/tiledb.h"
 
 #include <iostream>
@@ -53,7 +53,7 @@ TEST_CASE("C API: Test error and error message", "[capi][error]") {
   rc = tiledb_error_message(err, &errmsg);
   CHECK(rc == TILEDB_OK);
   CHECK_THAT(
-      errmsg, Catch::Equals("Error: Invalid group directory argument is NULL"));
+      errmsg, Catch::Matchers::Equals("Error: Invalid group directory argument is NULL"));
 
   // Clean up
   tiledb_error_free(&err);

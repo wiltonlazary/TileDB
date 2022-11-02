@@ -32,7 +32,7 @@
 
 #include <thread>
 
-#include "catch.hpp"
+#include <test/support/tdb_catch.h>
 #include "tiledb/sm/c_api/tiledb_serialization.h"
 #include "tiledb/sm/cpp_api/tiledb"
 
@@ -52,19 +52,25 @@ TEST_CASE("C++ API: Config", "[cppapi][config]") {
 
   auto readInvalidKey = [&config]() { std::string result2 = config["bar"]; };
   REQUIRE_THROWS_AS(readInvalidKey(), tiledb::TileDBError);
+
+  bool contains = config.contains("foo");
+  CHECK(contains == true);
+
+  contains = config.contains("bar");
+  CHECK(contains == false);
 }
 
-TEST_CASE("C++ API: Config iterator", "[cppapi][cppapi-config]") {
+TEST_CASE("C++ API: Config iterator", "[cppapi][config]") {
   tiledb::Config config;
   std::vector<std::string> names;
   for (auto it = config.begin("vfs"), ite = config.end(); it != ite; ++it) {
     names.push_back(it->first);
   }
   // Check number of VFS params in default config object.
-  CHECK(names.size() == 58);
+  CHECK(names.size() == 59);
 }
 
-TEST_CASE("C++ API: Config Environment Variables", "[cppapi][cppapi-config]") {
+TEST_CASE("C++ API: Config Environment Variables", "[cppapi][config]") {
   tiledb::Config config;
   auto readInvalidKey = [&config]() { std::string result1 = config["foo"]; };
   REQUIRE_THROWS_AS(readInvalidKey(), tiledb::TileDBError);
@@ -88,7 +94,7 @@ TEST_CASE("C++ API: Config Environment Variables", "[cppapi][cppapi-config]") {
 
 TEST_CASE(
     "C++ API: Config Environment Variables Default Override",
-    "[cppapi][cppapi-config]") {
+    "[cppapi][config]") {
   tiledb::Config config;
   const std::string key = "sm.io_concurrency_level";
 
@@ -114,7 +120,7 @@ TEST_CASE(
   CHECK(result3 == value3);
 }
 
-TEST_CASE("C++ API: Config Equality", "[cppapi][cppapi-config]") {
+TEST_CASE("C++ API: Config Equality", "[cppapi][config]") {
   // Check for equality
   tiledb::Config config1;
   config1["foo"] = "bar";
@@ -130,8 +136,7 @@ TEST_CASE("C++ API: Config Equality", "[cppapi][cppapi-config]") {
 }
 
 #ifdef TILEDB_SERIALIZATION
-TEST_CASE(
-    "C++ API: Config Serialization", "[cppapi][cppapi-config][serialization]") {
+TEST_CASE("C++ API: Config Serialization", "[cppapi][config][serialization]") {
   // this variable is parameterized below, but we initialize
   // here to avoid warning/error on MSVC
   //   C4701: potentially uninitialized local variable 'format'

@@ -34,7 +34,7 @@
 #ifndef TILEDB_UNIT_INTERVAL_H
 #define TILEDB_UNIT_INTERVAL_H
 
-#include <catch.hpp>
+#include <test/support/tdb_catch.h>
 #include <cmath>
 #include <optional>
 
@@ -364,7 +364,7 @@ Catch::Generators::GeneratorWrapper<typename ChooseGenerator<T>::value_type>
 choose(unsigned int k, std::initializer_list<T> list) {
   return Catch::Generators::GeneratorWrapper<
       typename ChooseGenerator<T>::value_type>(
-      std::make_unique<ChooseGenerator<T>>(k, list));
+      Catch::Detail::make_unique<ChooseGenerator<T>>(k, list));
 }
 
 /* ************************************ */

@@ -60,7 +60,7 @@ namespace serialization {
  * @return Status
  */
 Status config_to_capnp(
-    const Config* config, capnp::Config::Builder* config_builder);
+    const Config& config, capnp::Config::Builder* config_builder);
 
 /**
  * Create a config object from a cap'n proto class
@@ -86,9 +86,8 @@ Status attribute_to_capnp(
  * @param attribute attribute to deserialize into
  * @return Status
  */
-Status attribute_from_capnp(
-    const capnp::Attribute::Reader& attribute_reader,
-    tdb_unique_ptr<Attribute>* attribute);
+tuple<Status, optional<shared_ptr<Attribute>>> attribute_from_capnp(
+    const capnp::Attribute::Reader& attribute_reader);
 
 };  // namespace serialization
 };  // namespace sm
@@ -133,6 +132,8 @@ Status set_capnp_array_ptr(
       break;
     case tiledb::sm::Datatype::STRING_ASCII:
     case tiledb::sm::Datatype::STRING_UTF8:
+    case tiledb::sm::Datatype::BLOB:
+    case tiledb::sm::Datatype::BOOL:
     case tiledb::sm::Datatype::UINT8:
       builder.setUint8(kj::arrayPtr(static_cast<const uint8_t*>(ptr), size));
       break;
@@ -187,7 +188,7 @@ Status set_capnp_array_ptr(
       builder.setFloat64(kj::arrayPtr(static_cast<const double*>(ptr), size));
       break;
     default:
-      return Status::SerializationError(
+      return Status_SerializationError(
           "Cannot set capnp array pointer; unknown TileDB datatype.");
   }
 
@@ -212,6 +213,8 @@ Status set_capnp_scalar(
     case tiledb::sm::Datatype::INT8:
       builder.setInt8(*static_cast<const int8_t*>(value));
       break;
+    case tiledb::sm::Datatype::BLOB:
+    case tiledb::sm::Datatype::BOOL:
     case tiledb::sm::Datatype::UINT8:
       builder.setUint8(*static_cast<const uint8_t*>(value));
       break;
@@ -262,7 +265,7 @@ Status set_capnp_scalar(
       builder.setFloat64(*static_cast<const double*>(value));
       break;
     default:
-      return Status::SerializationError(
+      return Status_SerializationError(
           "Cannot set capnp scalar; unknown TileDB datatype.");
   }
 
@@ -319,6 +322,8 @@ Status copy_capnp_list(
       if (reader.hasInt8())
         RETURN_NOT_OK(copy_capnp_list<int8_t>(reader.getInt8(), buffer));
       break;
+    case tiledb::sm::Datatype::BLOB:
+    case tiledb::sm::Datatype::BOOL:
     case tiledb::sm::Datatype::UINT8:
       if (reader.hasUint8())
         RETURN_NOT_OK(copy_capnp_list<uint8_t>(reader.getUint8(), buffer));
@@ -378,27 +383,18 @@ Status copy_capnp_list(
         RETURN_NOT_OK(copy_capnp_list<double>(reader.getFloat64(), buffer));
       break;
     default:
-      return Status::SerializationError(
+      return Status_SerializationError(
           "Cannot copy capnp list; unhandled TileDB datatype.");
   }
 
   return Status::Ok();
 }
 
-/** Serializes the given array's nonEmptyDomain into the given Capnp builder.
- *
- * @tparam CapnpT Capnp builder type
- * @param builder Builder to set subarray onto
- * @param array Array to get nonEmptyDomain from
- * @return Status
- */
 template <typename CapnpT>
-Status serialize_non_empty_domain(CapnpT& builder, tiledb::sm::Array* array) {
-  const auto& nonEmptyDomain = array->non_empty_domain();
-
+Status serialize_non_empty_domain_rv(
+    CapnpT& builder, const NDRange& nonEmptyDomain, uint32_t dim_num) {
   if (!nonEmptyDomain.empty()) {
-    auto nonEmptyDomainListBuilder =
-        builder.initNonEmptyDomains(array->array_schema()->dim_num());
+    auto nonEmptyDomainListBuilder = builder.initNonEmptyDomains(dim_num);
 
     for (uint64_t dimIdx = 0; dimIdx < nonEmptyDomain.size(); ++dimIdx) {
       const auto& dimNonEmptyDomain = nonEmptyDomain[dimIdx];
@@ -424,15 +420,30 @@ Status serialize_non_empty_domain(CapnpT& builder, tiledb::sm::Array* array) {
   return Status::Ok();
 }
 
-/** Deserializes the given from Capnp build to array's nonEmptyDomain
+/** Serializes the given array's nonEmptyDomain into the given Capnp builder.
  *
  * @tparam CapnpT Capnp builder type
- * @param builder Builder to get nonEmptyDomain from
- * @param array Array to set the nonEmptyDomain on
+ * @param builder Builder to set subarray onto
+ * @param array Array to get nonEmptyDomain from
  * @return Status
  */
 template <typename CapnpT>
-Status deserialize_non_empty_domain(CapnpT& reader, tiledb::sm::Array* array) {
+Status serialize_non_empty_domain(CapnpT& builder, tiledb::sm::Array* array) {
+  auto&& [st, nonEmptyDomain_opt] = array->non_empty_domain();
+  RETURN_NOT_OK(st);
+  if (nonEmptyDomain_opt.has_value()) {
+    return serialize_non_empty_domain_rv(
+        builder,
+        nonEmptyDomain_opt.value(),
+        array->array_schema_latest().dim_num());
+  }
+
+  return Status::Ok();
+}
+
+template <typename CapnpT>
+std::pair<Status, std::optional<NDRange>> deserialize_non_empty_domain_rv(
+    CapnpT& reader) {
   capnp::NonEmptyDomainList::Reader r =
       (capnp::NonEmptyDomainList::Reader)reader;
 
@@ -441,7 +452,6 @@ Status deserialize_non_empty_domain(CapnpT& reader, tiledb::sm::Array* array) {
     auto nonEmptyDomains = r.getNonEmptyDomains();
 
     for (uint32_t i = 0; i < nonEmptyDomains.size(); i++) {
-      Range range;
       auto nonEmptyDomainObj = nonEmptyDomains[i];
       // We always store nonEmptyDomain as uint8 lists for the heterogeneous/var
       // length version
@@ -453,17 +463,28 @@ Status deserialize_non_empty_domain(CapnpT& reader, tiledb::sm::Array* array) {
 
       if (nonEmptyDomainObj.hasSizes()) {
         auto sizes = nonEmptyDomainObj.getSizes();
-        range.set_range(vec.data(), vec.size(), sizes[0]);
+        ndRange.emplace_back(vec.data(), vec.size(), sizes[0]);
       } else {
-        range.set_range(vec.data(), vec.size());
+        ndRange.emplace_back(vec.data(), vec.size());
       }
-
-      ndRange.emplace_back(range);
     }
   }
 
-  array->set_non_empty_domain(ndRange);
+  return {Status::Ok(), ndRange};
+}
 
+/** Deserializes the given from Capnp build to array's nonEmptyDomain
+ *
+ * @tparam CapnpT Capnp builder type
+ * @param builder Builder to get nonEmptyDomain from
+ * @param array Array to set the nonEmptyDomain on
+ * @return Status
+ */
+template <typename CapnpT>
+Status deserialize_non_empty_domain(CapnpT& reader, tiledb::sm::Array* array) {
+  auto&& [status, ndrange] = deserialize_non_empty_domain_rv(reader);
+  RETURN_NOT_OK(status);
+  array->set_non_empty_domain(*ndrange);
   return Status::Ok();
 }
 
@@ -479,20 +500,20 @@ Status deserialize_non_empty_domain(CapnpT& reader, tiledb::sm::Array* array) {
 template <typename CapnpT>
 Status serialize_subarray(
     CapnpT& builder,
-    const tiledb::sm::ArraySchema* array_schema,
+    const tiledb::sm::ArraySchema& array_schema,
     const void* subarray) {
   // Check coords type
-  auto dim_num = array_schema->dim_num();
+  auto dim_num = array_schema.dim_num();
   uint64_t subarray_size = 0;
-  Datatype first_dimension_datatype = array_schema->dimension(0)->type();
+  Datatype first_dimension_datatype{array_schema.dimension_ptr(0)->type()};
   // If all the dimensions are the same datatype, then we will store the
   // subarray in a type array for <=1.7 compatibility
   for (unsigned d = 0; d < dim_num; ++d) {
-    auto dimension = array_schema->dimension(d);
+    auto dimension{array_schema.dimension_ptr(d)};
     const auto coords_type = dimension->type();
 
     if (coords_type != first_dimension_datatype) {
-      return Status::SerializationError(
+      return Status_SerializationError(
           "Subarray dimension datatypes must be homogeneous");
     }
 
@@ -506,7 +527,7 @@ Status serialize_subarray(
       case tiledb::sm::Datatype::STRING_UCS4:
       case tiledb::sm::Datatype::ANY:
         // String dimensions not yet supported
-        return LOG_STATUS(Status::SerializationError(
+        return LOG_STATUS(Status_SerializationError(
             "Cannot serialize subarray; unsupported domain type."));
       default:
         break;
@@ -526,18 +547,18 @@ Status serialize_subarray(
 template <typename CapnpT>
 Status deserialize_subarray(
     const CapnpT& reader,
-    const tiledb::sm::ArraySchema* array_schema,
+    const tiledb::sm::ArraySchema& array_schema,
     void** subarray) {
   // Check coords type
-  auto dim_num = array_schema->dim_num();
+  auto dim_num = array_schema.dim_num();
   uint64_t subarray_size = 0;
-  Datatype first_dimension_datatype = array_schema->dimension(0)->type();
+  Datatype first_dimension_datatype{array_schema.dimension_ptr(0)->type()};
   for (unsigned d = 0; d < dim_num; ++d) {
-    auto dimension = array_schema->dimension(d);
+    auto dimension{array_schema.dimension_ptr(d)};
     const auto coords_type = dimension->type();
 
     if (coords_type != first_dimension_datatype) {
-      return Status::SerializationError(
+      return Status_SerializationError(
           "Subarray dimension datatypes must be homogeneous");
     }
 
@@ -551,7 +572,7 @@ Status deserialize_subarray(
       case tiledb::sm::Datatype::STRING_UCS4:
       case tiledb::sm::Datatype::ANY:
         // String dimensions not yet supported
-        return LOG_STATUS(Status::SerializationError(
+        return LOG_STATUS(Status_SerializationError(
             "Cannot deserialize subarray; unsupported domain type."));
       default:
         break;

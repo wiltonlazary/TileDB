@@ -4,7 +4,7 @@
 #
 # The MIT License
 #
-# Copyright (c) 2017-2021 TileDB, Inc.
+# Copyright (c) 2017-2022 TileDB, Inc.
 # Copyright (c) 2016 MIT and Intel Corporation
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -96,13 +96,23 @@ set(TILEDB_CORE_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/..")
 list(APPEND TILEDB_CORE_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../tiledb/sm/c_api")
 
 # Gather the test source files
-set(TILEDB_TEST_SOURCES
-  src/helpers.h
-  src/helpers.cc
-  src/helpers-dimension.h
+set(TILEDB_TEST_SUPPORT_SOURCES
+  support/src/ast_helpers.h
+  support/src/ast_helpers.cc
+  support/src/helpers.h
+  support/src/helpers.cc
+  support/src/helpers-dimension.h
+  support/src/vfs_helpers.cc
+  support/src/serialization_wrappers.cc
+  )
+
+set(TILEDB_UNIT_TEST_SOURCES
+  support/src/ast_helpers.h
+  support/src/helpers.h
+  support/src/helpers-dimension.h
+  src/test-capi-query-error-handling.cc
   src/unit-azure.cc
   src/unit-backwards_compat.cc
-  src/unit-buffer.cc
   src/unit-bufferlist.cc
   src/unit-capi-any.cc
   src/unit-capi-array.cc
@@ -111,6 +121,7 @@ set(TILEDB_TEST_SOURCES
   src/unit-capi-attributes.cc
   src/unit-capi-buffer.cc
   src/unit-capi-config.cc
+  src/unit-capi-context.cc
   src/unit-capi-consolidation.cc
   src/unit-capi-dense_array.cc
   src/unit-capi-dense_array_2.cc
@@ -118,9 +129,11 @@ set(TILEDB_TEST_SOURCES
   src/unit-capi-dense_vector.cc
   src/unit-capi-enum_values.cc
   src/unit-capi-error.cc
+  src/unit-capi-filestore.cc
   src/unit-capi-fill_values.cc
   src/unit-capi-filter.cc
   src/unit-capi-fragment_info.cc
+  src/unit-capi-group.cc
   src/unit-capi-incomplete.cc
   src/unit-capi-incomplete-2.cc
   src/unit-capi-metadata.cc
@@ -137,6 +150,7 @@ set(TILEDB_TEST_SOURCES
   src/unit-capi-sparse_real_2.cc
   src/unit-capi-string.cc
   src/unit-capi-string_dims.cc
+  src/unit-capi-update-queries.cc
   src/unit-capi-uri.cc
   src/unit-capi-version.cc
   src/unit-capi-vfs.cc
@@ -147,57 +161,67 @@ set(TILEDB_TEST_SOURCES
   src/unit-ctx.cc
   src/unit-DenseTiler.cc
   src/unit-dimension.cc
+  src/unit-domain.cc
   src/unit-duplicates.cc
   src/unit-empty-var-length.cc
   src/unit-filter-buffer.cc
   src/unit-filter-pipeline.cc
+  src/unit-global-order.cc
   src/unit-gcs.cc
+  src/unit-gs.cc
   src/unit-hdfs-filesystem.cc
-  src/unit-hilbert.cc
   src/unit-lru_cache.cc
-  src/unit-QueryCondition.cc
+  src/unit-ordered-dim-label-reader.cc
+  src/unit-tile-metadata.cc
+  src/unit-tile-metadata-generator.cc
   src/unit-ReadCellSlabIter.cc
   src/unit-Reader.cc
-  src/unit-rtree.cc
+  src/unit-resource-pool.cc
+  src/unit-result-coords.cc
+  src/unit-result-tile.cc
   src/unit-s3-no-multipart.cc
   src/unit-s3.cc
-  src/unit-status.cc
+  src/unit-sparse-global-order-reader.cc
+  src/unit-sparse-unordered-with-dups-reader.cc
   src/unit-Subarray.cc
   src/unit-SubarrayPartitioner-dense.cc
   src/unit-SubarrayPartitioner-error.cc
   src/unit-SubarrayPartitioner-sparse.cc
-  src/unit-threadpool.cc
   src/unit-Tile.cc
-  src/unit-TileDomain.cc
-  src/unit-uri.cc
-  src/unit-utils.cc
   src/unit-uuid.cc
-  src/unit-ValidityVector.cc
   src/unit-vfs.cc
   src/unit-win-filesystem.cc
-  src/unit.cc
-  src/vfs_helpers.cc)
+  )
 
 if (TILEDB_CPP_API)
-  list(APPEND TILEDB_TEST_SOURCES
+  list(APPEND TILEDB_UNIT_TEST_SOURCES
     src/unit-cppapi-array.cc
     src/unit-cppapi-checksum.cc
     src/unit-cppapi-config.cc
     src/unit-cppapi-consolidation-sparse.cc
     src/unit-cppapi-consolidation.cc
+    src/unit-cppapi-consolidation-with-timestamps.cc
     src/unit-cppapi-datetimes.cc
+    src/unit-cppapi-deletes.cc
+    src/unit-cppapi-dense-qc-coords-mode.cc
     src/unit-cppapi-time.cc
     src/unit-cppapi-fill_values.cc
     src/unit-cppapi-filter.cc
+    src/unit-cppapi-float-scaling-filter.cc
+    src/unit-cppapi-xor-filter.cc
     src/unit-cppapi-fragment_info.cc
+    src/unit-cppapi-group.cc
     src/unit-cppapi-hilbert.cc
+    src/unit-cppapi-max-fragment-size.cc
     src/unit-cppapi-metadata.cc
     src/unit-cppapi-nullable.cc
     src/unit-cppapi-query.cc
+    src/cpp-integration-query-condition.cc
     src/unit-cppapi-schema.cc
     src/unit-cppapi-string-dims.cc
     src/unit-cppapi-subarray.cc
     src/unit-cppapi-type.cc
+    src/unit-cppapi-update-queries.cc
     src/unit-cppapi-updates.cc
     src/unit-cppapi-util.cc
     src/unit-cppapi-var-offsets.cc
@@ -206,22 +230,35 @@ if (TILEDB_CPP_API)
 endif()
 
 if (TILEDB_SERIALIZATION)
-  list(APPEND TILEDB_TEST_SOURCES
+  list(APPEND TILEDB_UNIT_TEST_SOURCES
     src/unit-capi-serialized_queries.cc
+    src/unit-capi-serialized_queries_using_subarray.cc
+    src/unit-QueryCondition-serialization.cc
     src/unit-curl.cc
   )
 endif()
 
 if (TILEDB_TESTS_ENABLE_REST)
-  list(APPEND TILEDB_TEST_SOURCES
+  list(APPEND TILEDB_UNIT_TEST_SOURCES
     src/unit-capi-rest-dense_array.cc
   )
 endif()
 
 if (TILEDB_ARROW_TESTS)
-  list(APPEND TILEDB_TEST_SOURCES
+  list(APPEND TILEDB_UNIT_TEST_SOURCES
     src/unit-arrow.cc
     ${CMAKE_SOURCE_DIR}/tiledb/sm/cpp_api/arrow_io_impl.h
+  )
+endif()
+
+if (TILEDB_EXPERIMENTAL_FEATURES)
+  list(APPEND TILEDB_UNIT_TEST_SOURCES
+    src/experimental_helpers.cc
+    src/test-capi-array-many-dimension-labels.cc
+    src/test-capi-dimension_labels.cc
+    src/test-capi-dense-array-dimension-label.cc
+    src/test-capi-dense-array-dimension-label-var.cc
+    src/test-capi-sparse-array-dimension-label.cc
   )
 endif()
 
@@ -229,12 +266,16 @@ if (TILEDB_VERBOSE)
   add_definitions(-DTILEDB_VERBOSE)
 endif()
 
+
 # unit test executable
 add_executable(
   tiledb_unit EXCLUDE_FROM_ALL
   $<TARGET_OBJECTS:TILEDB_CORE_OBJECTS>
-  ${TILEDB_TEST_SOURCES}
+  ${TILEDB_UNIT_TEST_SOURCES}
+  "src/unit.cc"
 )
+
+add_dependencies(tiledb_unit tiledb_test_support_lib)
 
 # We want tests to continue as normal even as the API is changing,
 # so don't warn for deprecations, since they'll be escalated to errors.
@@ -252,7 +293,10 @@ target_link_libraries(tiledb_unit
   PUBLIC
     TILEDB_CORE_OBJECTS_ILIB
     Catch2::Catch2
+    tiledb_test_support_lib
 )
+
+target_link_libraries(tiledb_unit PRIVATE $<BUILD_INTERFACE:common>)
 
 # need to properly link the signal chaining library for catch to work with the jni hdfs interface
 # see: https://docs.oracle.com/javase/9/vm/signal-chaining.htm
@@ -330,3 +374,12 @@ add_custom_target(
   check COMMAND ${CMAKE_CTEST_COMMAND} -V -C ${CMAKE_BUILD_TYPE}
   DEPENDS tiledb_unit
 )
+
+# CI tests
+add_subdirectory(ci)
+if(WIN32)
+  add_subdirectory(performance)
+endif()
+
+#add tests related to external items
+add_subdirectory(external)

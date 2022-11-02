@@ -35,15 +35,15 @@
  * yet. Additionally global order queries have been removed.
  */
 
-#include "catch.hpp"
-#include "test/src/helpers.h"
-#include "test/src/vfs_helpers.h"
+#include <test/support/tdb_catch.h>
+#include "test/support/src/helpers.h"
+#include "test/support/src/vfs_helpers.h"
 #ifdef _WIN32
 #include "tiledb/sm/filesystem/win.h"
 #else
 #include "tiledb/sm/filesystem/posix.h"
 #endif
-#include "test/src/helpers.h"
+#include "test/support/src/helpers.h"
 #include "tiledb/sm/c_api/tiledb.h"
 #include "tiledb/sm/enums/encryption_type.h"
 #include "tiledb/sm/misc/utils.h"
@@ -220,8 +220,7 @@ DenseArrayRESTFx::~DenseArrayRESTFx() {
   config.set("rest.password", rest_server_password_);
 
   tiledb::sm::RestClient rest_client;
-  ThreadPool tp;
-  REQUIRE(tp.init(4).ok());
+  ThreadPool tp(4);
   REQUIRE(rest_client.init(&config, &tp).ok());
   for (const auto& uri : to_deregister_) {
     CHECK(rest_client.deregister_array_from_rest(tiledb::sm::URI(uri)).ok());
@@ -644,7 +643,7 @@ void DenseArrayRESTFx::check_sorted_reads(const std::string& path) {
     // Read subarray
     int* buffer = read_dense_array_2D(
         array_name, d0_lo, d0_hi, d1_lo, d1_hi, TILEDB_READ, TILEDB_ROW_MAJOR);
-    REQUIRE(buffer != NULL);
+    REQUIRE(buffer != nullptr);
 
     bool allok = true;
     // Check
@@ -895,7 +894,7 @@ void DenseArrayRESTFx::check_sorted_writes(const std::string& path) {
         subarray[3],
         TILEDB_READ,
         TILEDB_ROW_MAJOR);
-    REQUIRE(read_buffer != NULL);
+    REQUIRE(read_buffer != nullptr);
 
     // Check the two buffers
     bool allok = true;

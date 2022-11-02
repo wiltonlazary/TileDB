@@ -33,11 +33,17 @@
 #ifndef TILEDB_ATTRIBUTE_H
 #define TILEDB_ATTRIBUTE_H
 
+#include "tiledb/common/common.h"
 #include "tiledb/common/status.h"
 #include "tiledb/sm/filter/filter_pipeline.h"
 #include "tiledb/sm/misc/types.h"
 
 using namespace tiledb::common;
+using namespace tiledb::type;
+
+namespace tiledb::type {
+class Range;
+}
 
 namespace tiledb {
 namespace sm {
@@ -70,6 +76,26 @@ class Attribute {
   Attribute(const std::string& name, Datatype type, bool nullable = false);
 
   /**
+   * Constructor.
+   *
+   * @param name The name of the attribute.
+   * @param type The type of the attribute.
+   * @param nullable The nullable of the attribute.
+   * @param cell_val_num The cell number of the attribute.
+   * @param filter_pipeline The filters of the attribute.
+   * @param fill_value The fill value of the attribute.
+   * @param fill_value_validity The validity of fill_value.
+   */
+  Attribute(
+      const std::string& name,
+      Datatype type,
+      bool nullable,
+      uint32_t cell_val_num,
+      const FilterPipeline& filter_pipeline,
+      const ByteVecValue& fill_value,
+      uint8_t fill_value_validity);
+
+  /**
    * Constructor. It clones the input attribute.
    *
    * @param attr The attribute to be cloned.
@@ -85,6 +111,9 @@ class Attribute {
 
   /** Copy-assignment operator. */
   DISABLE_COPY_ASSIGN(Attribute);
+
+  /** Move constructor. */
+  Attribute(Attribute&&) = default;
 
   /** Destructor. */
   ~Attribute();
@@ -105,11 +134,11 @@ class Attribute {
   /**
    * Populates the object members from the data in the input binary buffer.
    *
-   * @param buff The buffer to deserialize from.
+   * @param deserializer The deserializer to deserialize from.
    * @param version The format spec version.
-   * @return Status
+   * @return Attribute
    */
-  Status deserialize(ConstBuffer* buff, uint32_t version);
+  static Attribute deserialize(Deserializer& deserializer, uint32_t version);
 
   /** Dumps the attribute contents in ASCII form in the selected output. */
   void dump(FILE* out) const;
@@ -123,11 +152,11 @@ class Attribute {
   /**
    * Serializes the object members into a binary buffer.
    *
-   * @param buff The buffer to serialize the data into.
+   * @param serializer The object the attribute is serialized into.
    * @param version The format spec version.
    * @return Status
    */
-  Status serialize(Buffer* buff, uint32_t version);
+  void serialize(Serializer& serializer, uint32_t version) const;
 
   /**
    * Sets the attribute number of values per cell. Note that if the attribute
@@ -154,7 +183,7 @@ class Attribute {
   Status get_nullable(bool* nullable);
 
   /** Sets the filter pipeline for this attribute. */
-  Status set_filter_pipeline(const FilterPipeline* pipeline);
+  Status set_filter_pipeline(const FilterPipeline& pipeline);
 
   /** Sets the attribute name. */
   void set_name(const std::string& name);
@@ -204,6 +233,10 @@ class Attribute {
    * otherwise.
    */
   bool nullable() const;
+
+  /** The default fill value. */
+  static ByteVecValue default_fill_value(
+      Datatype datatype, uint32_t cell_val_num);
 
  private:
   /* ********************************* */

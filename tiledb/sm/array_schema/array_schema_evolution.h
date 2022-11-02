@@ -37,11 +37,12 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "tiledb/common/common.h"
 #include "tiledb/common/status.h"
+#include "tiledb/sm/filesystem/uri.h"
 #include "tiledb/sm/filter/filter_pipeline.h"
 #include "tiledb/sm/misc/constants.h"
 #include "tiledb/sm/misc/hilbert.h"
-#include "tiledb/sm/misc/uri.h"
 #include "tiledb/sm/misc/uuid.h"
 
 using namespace tiledb::common;
@@ -78,8 +79,8 @@ class ArraySchemaEvolution {
   /*               API                 */
   /* ********************************* */
 
-  Status evolve_schema(
-      const ArraySchema* orig_schema, ArraySchema** new_schema);
+  tuple<Status, optional<shared_ptr<ArraySchema>>> evolve_schema(
+      const shared_ptr<const ArraySchema>& orig_schema);
 
   /**
    * Adds an attribute, copying the input.
@@ -109,6 +110,13 @@ class ArraySchemaEvolution {
   /** Returns the names of attributes to drop. */
   std::vector<std::string> attribute_names_to_drop() const;
 
+  /** Set a timestamp range for the array schema evolution */
+  Status set_timestamp_range(
+      const std::pair<uint64_t, uint64_t>& timestamp_range);
+
+  /** Returns the timestamp range. */
+  std::pair<uint64_t, uint64_t> timestamp_range() const;
+
  private:
   /* ********************************* */
   /*         PRIVATE ATTRIBUTES        */
@@ -116,11 +124,18 @@ class ArraySchemaEvolution {
 
   /** The array attributes to be added. */
   /** It maps each attribute name to the corresponding attribute object. */
-  std::unordered_map<std::string, tdb_unique_ptr<Attribute>>
-      attributes_to_add_map_;
+  std::unordered_map<std::string, shared_ptr<Attribute>> attributes_to_add_map_;
 
   /** The names of array attributes to be dropped. */
   std::unordered_set<std::string> attributes_to_drop_;
+
+  /**
+   * A timestamp to explicitly set the timestamp of
+   * the evolved schema.  To be consistent with
+   * the schema timestamp_range_, two identical
+   * timestamps are stored as a pair.
+   */
+  std::pair<uint64_t, uint64_t> timestamp_range_;
 
   /** Mutex for thread-safety. */
   mutable std::mutex mtx_;

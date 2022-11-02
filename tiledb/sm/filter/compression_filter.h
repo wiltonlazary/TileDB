@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -34,7 +34,10 @@
 #define TILEDB_COMPRESSION_FILTER_H
 
 #include "tiledb/common/status.h"
+#include "tiledb/sm/compressors/zstd_compressor.h"
 #include "tiledb/sm/filter/filter.h"
+#include "tiledb/sm/misc/constants.h"
+#include "tiledb/sm/misc/resource_pool.h"
 
 using namespace tiledb::common;
 
@@ -80,16 +83,24 @@ class CompressionFilter : public Filter {
    *
    * @param compressor Compressor to use
    * @param level Compression level to use
+   * @param version Format version
    */
-  CompressionFilter(Compressor compressor, int level);
+  CompressionFilter(
+      Compressor compressor,
+      int level,
+      const format_version_t version = constants::format_version);
 
   /**
    * Constructor.
    *
    * @param compressor Compressor to use
    * @param level Compression level to use
+   * @param version Format version
    */
-  CompressionFilter(FilterType compressor, int level);
+  CompressionFilter(
+      FilterType compressor,
+      int level,
+      const format_version_t version = constants::format_version);
 
   /** Return the compressor used by this filter instance. */
   Compressor compressor() const;
@@ -104,6 +115,8 @@ class CompressionFilter : public Filter {
    * Compress the given input into the given output.
    */
   Status run_forward(
+      const Tile& tile,
+      Tile* const tile_offsets,
       FilterBuffer* input_metadata,
       FilterBuffer* input,
       FilterBuffer* output_metadata,
@@ -113,6 +126,8 @@ class CompressionFilter : public Filter {
    * Decompress the given input into the given output.
    */
   Status run_reverse(
+      const Tile& tile,
+      Tile* const tile_offsets,
       FilterBuffer* input_metadata,
       FilterBuffer* input,
       FilterBuffer* output_metadata,
@@ -132,12 +147,36 @@ class CompressionFilter : public Filter {
   /** The compression level. */
   int level_;
 
+  /** The format version. */
+  uint32_t version_;
+
+  /** The default filter compression level. */
+  static constexpr int default_level_ = -30000;
+
+  /** Mutex guarding zstd_compress_ctx_pool */
+  std::mutex zstd_compress_ctx_pool_mtx_;
+
+  /** Mutex guarding zstd_decompress_ctx_pool */
+  std::mutex zstd_decompress_ctx_pool_mtx_;
+
+  /** A resource pool to be used in ZStd compressor for improved performance */
+  shared_ptr<BlockingResourcePool<ZStd::ZSTD_Compress_Context>>
+      zstd_compress_ctx_pool_;
+
+  /** A resource pool to be used in ZStd decompressor for improved performance
+   */
+  shared_ptr<BlockingResourcePool<ZStd::ZSTD_Decompress_Context>>
+      zstd_decompress_ctx_pool_;
+
   /** Returns a new clone of this filter. */
   CompressionFilter* clone_impl() const override;
 
   /** Helper function to compress a single contiguous buffer (part). */
   Status compress_part(
-      ConstBuffer* part, Buffer* output, FilterBuffer* output_metadata) const;
+      const Tile& tile,
+      ConstBuffer* part,
+      Buffer* output,
+      FilterBuffer* output_metadata) const;
 
   /** Return the FilterType corresponding to the given Compressor. */
   static FilterType compressor_to_filter(Compressor compressor);
@@ -147,10 +186,36 @@ class CompressionFilter : public Filter {
    * onto the single output buffer.
    */
   Status decompress_part(
-      FilterBuffer* input, Buffer* output, FilterBuffer* input_metadata) const;
+      const Tile& tile,
+      FilterBuffer* input,
+      Buffer* output,
+      FilterBuffer* input_metadata) const;
 
-  /** Deserializes this filter's metadata from the given buffer. */
-  Status deserialize_impl(ConstBuffer* buff) override;
+  /** Calculate the size of the output metadata to allocate */
+  size_t calculate_output_metadata_size(
+      const Tile& tile,
+      const std::vector<ConstBuffer>& data_parts,
+      const std::vector<ConstBuffer>& metadata_parts) const;
+
+  /**
+   * Helper function to compress a buffer of variable-sized strings for certain
+   * algorithms where this is a special case
+   */
+  Status compress_var_string_coords(
+      const FilterBuffer& input,
+      Tile* const offsets_tile,
+      FilterBuffer& output,
+      FilterBuffer& output_metadata) const;
+
+  /**
+   * Helper function to decompress a buffer of variable-sized strings for
+   * certain algorithms where this is a special case
+   */
+  Status decompress_var_string_coords(
+      FilterBuffer& input,
+      FilterBuffer& input_metadata,
+      Tile* offsets_tile,
+      FilterBuffer& output) const;
 
   /** Gets an option from this filter. */
   Status get_option_impl(FilterOption option, void* value) const override;
@@ -159,13 +224,32 @@ class CompressionFilter : public Filter {
   static Compressor filter_to_compressor(FilterType type);
 
   /** Computes the compression overhead on nbytes of the input data. */
-  uint64_t overhead(uint64_t nbytes) const;
+  uint64_t overhead(const Tile& tile, uint64_t nbytes) const;
 
   /** Sets an option on this filter. */
   Status set_option_impl(FilterOption option, const void* value) override;
 
   /** Serializes this filter's metadata to the given buffer. */
-  Status serialize_impl(Buffer* buff) const override;
+  void serialize_impl(Serializer& serializer) const override;
+
+  /** Initializes the compression resource pool */
+  void init_compression_resource_pool(uint64_t size) override;
+
+  /** Initializes the decompression resource pool */
+  void init_decompression_resource_pool(uint64_t size) override;
+
+  /** Creates a vector of views of the input strings and returns the max string
+   * size */
+  static tuple<std::vector<std::string_view>, uint64_t> create_input_view(
+      const FilterBuffer& input, Tile* const offsets_tile);
+
+  /**
+   * Return the number of bytes required to store an integer
+   *
+   * @param param_length Number to calculate the bytesize
+   * @return Number of bytes required to store the input number
+   */
+  static uint8_t compute_bytesize(uint64_t param_length);
 };
 
 }  // namespace sm

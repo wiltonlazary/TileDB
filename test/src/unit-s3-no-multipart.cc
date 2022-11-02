@@ -32,13 +32,13 @@
 
 #ifdef HAVE_S3
 
-#include "catch.hpp"
-#include "test/src/helpers.h"
+#include <test/support/tdb_catch.h>
+#include "test/support/src/helpers.h"
 #include "tiledb/common/thread_pool.h"
 #include "tiledb/sm/config/config.h"
 #include "tiledb/sm/filesystem/s3.h"
 #include "tiledb/sm/global_state/unit_test_config.h"
-#include "tiledb/sm/misc/utils.h"
+#include "tiledb/sm/misc/tdb_time.h"
 
 #include <fstream>
 #include <thread>
@@ -53,7 +53,7 @@ struct S3DirectFx {
       tiledb::sm::URI(S3_PREFIX + random_name("tiledb") + "/");
   const std::string TEST_DIR = S3_BUCKET.to_string() + "tiledb_test_dir/";
   tiledb::sm::S3 s3_;
-  ThreadPool thread_pool_;
+  ThreadPool thread_pool_{2};
 
   S3DirectFx();
   ~S3DirectFx();
@@ -74,7 +74,6 @@ S3DirectFx::S3DirectFx() {
   // set max buffer size to 10 MB
   REQUIRE(config.set("vfs.s3.multipart_part_size", "10000000").ok());
   REQUIRE(config.set("vfs.s3.use_multipart_upload", "false").ok());
-  REQUIRE(thread_pool_.init(2).ok());
   REQUIRE(s3_.init(&g_helper_stats, config, &thread_pool_).ok());
 
   // Create bucket
@@ -105,7 +104,7 @@ S3DirectFx::~S3DirectFx() {
 
   // Delete bucket
   CHECK(s3_.remove_bucket(S3_BUCKET).ok());
-  s3_.disconnect();
+  CHECK(s3_.disconnect().ok());
 }
 
 TEST_CASE_METHOD(
@@ -155,7 +154,7 @@ TEST_CASE_METHOD(
 
   // Read from the beginning
   auto read_buffer = new char[26];
-  uint64_t bytes_read;
+  uint64_t bytes_read = 0;
   CHECK(s3_.read(URI(largefile), 0, read_buffer, 26, 0, &bytes_read).ok());
   assert(26 == bytes_read);
   bool allok = true;

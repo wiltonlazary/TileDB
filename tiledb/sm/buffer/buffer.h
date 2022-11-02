@@ -89,6 +89,27 @@ class BufferBase {
   Status read(void* destination, uint64_t nbytes);
 
   /**
+   * Wraps the read function, converting Status error to a runtime exception
+   * using the name of the requested variable.
+   *
+   * If read failed, a runtime exception will be throw with the message:
+   *
+   *   "Failed to load " + variable_description + "."
+   *
+   * @param destination The buffer to read the data into.
+   * @param nbytes The number of bytes to read.
+   * @param variable_description Name of the variable to use if read fails.
+   */
+  inline void read(
+      void* destination,
+      uint64_t nbytes,
+      const std::string& variable_description) {
+    auto st = read(destination, nbytes);
+    if (!st.ok())
+      throw std::runtime_error("Failed to load " + variable_description + ".");
+  }
+
+  /**
    * Reads from the local data at an offset into the input buffer.
    *
    * @param destination The buffer to read the data into.
@@ -192,12 +213,6 @@ class Buffer : public BufferBase {
   /** Returns the buffer data pointer at the input offset. */
   void* data(uint64_t offset) const;
 
-  /**
-   * Sets `owns_data_` to `false` and thus will not destroy the data
-   * in the destructor.
-   */
-  void disown_data();
-
   /** Returns the number of byte of free space in the buffer. */
   uint64_t free_space() const;
 
@@ -224,9 +239,8 @@ class Buffer : public BufferBase {
    * offset, data ownership, etc).
    *
    * @param other Buffer to swap with.
-   * @return Status
    */
-  Status swap(Buffer& other);
+  void swap(Buffer& other);
 
   /**
    * Returns the value of type T at the input offset.

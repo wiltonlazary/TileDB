@@ -60,6 +60,12 @@ namespace tiledb {
  * // Create a dimension with inclusive domain [0,1000] and tile extent 100.
  * domain.add_dimension(Dimension::create<int32_t>(ctx, "d", {{0, 1000}}, 100));
  * @endcode
+ *
+ * Note: as laid out in the Storage Format,
+ * the following Datatypes are not valid for Dimension:
+ * TILEDB_CHAR, TILEDB_BLOB, TILEDB_BOOL, TILEDB_STRING_UTF8,
+ * TILEDB_STRING_UTF16, TILEDB_STRING_UTF32, TILEDB_STRING_UCS2,
+ * TILEDB_STRING_UCS4, TILEDB_ANY
  **/
 class Dimension {
  public:
@@ -247,7 +253,9 @@ class Dimension {
         // Strings have null domains so let's return an empty string
         // representation
         return "";
+      case TILEDB_BLOB:
       case TILEDB_CHAR:
+      case TILEDB_BOOL:
       case TILEDB_STRING_UTF8:
       case TILEDB_STRING_UTF16:
       case TILEDB_STRING_UTF32:
@@ -364,7 +372,9 @@ class Dimension {
         // Strings have null tile extents so let's return an empty string
         // representation
         return "";
+      case TILEDB_BLOB:
       case TILEDB_CHAR:
+      case TILEDB_BOOL:
       case TILEDB_STRING_UTF8:
       case TILEDB_STRING_UTF16:
       case TILEDB_STRING_UTF32:

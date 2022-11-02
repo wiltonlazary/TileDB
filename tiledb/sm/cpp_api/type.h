@@ -37,10 +37,12 @@
 
 #include "tiledb.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <iterator>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -80,8 +82,15 @@ template <typename T>
 struct type_to_tiledb {
   static_assert(IS_TRIVIALLY_COPYABLE(T), "Type must be trivially copyable.");
   using type = char;
-  static const tiledb_datatype_t tiledb_type = TILEDB_CHAR;
+  static const tiledb_datatype_t tiledb_type = TILEDB_STRING_ASCII;
   static constexpr const char* name = "Trivially Copyable (CHAR)";
+};
+
+template <>
+struct type_to_tiledb<std::byte> {
+  using type = std::byte;
+  static const tiledb_datatype_t tiledb_type = TILEDB_BLOB;
+  static constexpr const char* name = "BLOB";
 };
 
 template <>
@@ -166,6 +175,20 @@ struct tiledb_to_type<TILEDB_CHAR> {
 };
 
 template <>
+struct tiledb_to_type<TILEDB_BLOB> {
+  using type = std::byte;
+  static const tiledb_datatype_t tiledb_type = TILEDB_BLOB;
+  static constexpr const char* name = "BLOB";
+};
+
+template <>
+struct tiledb_to_type<TILEDB_BOOL> {
+  using type = uint8_t;
+  static const tiledb_datatype_t tiledb_type = TILEDB_BOOL;
+  static constexpr const char* name = "BOOL";
+};
+
+template <>
 struct tiledb_to_type<TILEDB_INT8> {
   using type = int8_t;
   static const tiledb_datatype_t tiledb_type = TILEDB_INT8;
@@ -244,6 +267,7 @@ inline std::string type_to_str(tiledb_datatype_t type) {
 
 inline bool tiledb_string_type(tiledb_datatype_t type) {
   switch (type) {
+    case TILEDB_CHAR:
     case TILEDB_STRING_ASCII:
     case TILEDB_STRING_UTF8:
     case TILEDB_STRING_UTF16:

@@ -32,6 +32,7 @@
  */
 
 #include "tiledb/sm/array_schema/array_schema_evolution.h"
+#include "tiledb/common/common.h"
 #include "tiledb/common/heap_memory.h"
 #include "tiledb/common/logger.h"
 #include "tiledb/sm/array_schema/array_schema.h"
@@ -72,46 +73,57 @@ ArraySchemaEvolution::~ArraySchemaEvolution() {
 /*               API              */
 /* ****************************** */
 
-Status ArraySchemaEvolution::evolve_schema(
-    const ArraySchema* orig_schema, ArraySchema** new_schema) {
+tuple<Status, optional<shared_ptr<ArraySchema>>>
+ArraySchemaEvolution::evolve_schema(
+    const shared_ptr<const ArraySchema>& orig_schema) {
   std::lock_guard<std::mutex> lock(mtx_);
   if (orig_schema == nullptr) {
-    return LOG_STATUS(Status::ArraySchemaEvolutionError(
-        "Cannot evolve schema; Input array schema is null"));
+    return {LOG_STATUS(Status_ArraySchemaEvolutionError(
+                "Cannot evolve schema; Input array schema is null")),
+            nullopt};
   }
 
-  auto schema = tdb_new(ArraySchema, orig_schema);
+  auto schema = make_shared<ArraySchema>(HERE(), *(orig_schema.get()));
 
   // Add attributes.
   for (auto& attr : attributes_to_add_map_) {
-    RETURN_NOT_OK(schema->add_attribute(attr.second.get(), false));
+    RETURN_NOT_OK_TUPLE(schema->add_attribute(attr.second, false), nullopt);
   }
 
   // Drop attributes.
   for (auto& attr_name : attributes_to_drop_) {
     bool has_attr = false;
-    RETURN_NOT_OK(schema->has_attribute(attr_name, &has_attr));
+    RETURN_NOT_OK_TUPLE(schema->has_attribute(attr_name, &has_attr), nullopt);
     if (has_attr) {
-      RETURN_NOT_OK(schema->drop_attribute(attr_name));
+      RETURN_NOT_OK_TUPLE(schema->drop_attribute(attr_name), nullopt);
     }
   }
 
   // Do other things
 
-  *new_schema = schema;
-  return Status::Ok();
+  // Set timestamp, if specified
+  if (std::get<0>(timestamp_range_) != 0) {
+    RETURN_NOT_OK_TUPLE(
+        schema.get()->set_timestamp_range(timestamp_range_), nullopt);
+    RETURN_NOT_OK_TUPLE(schema->generate_uri(timestamp_range_), nullopt);
+  } else {
+    // Generate new schema URI
+    RETURN_NOT_OK_TUPLE(schema->generate_uri(), nullopt);
+  }
+
+  return {Status::Ok(), schema};
 }
 
 Status ArraySchemaEvolution::add_attribute(const Attribute* attr) {
   std::lock_guard<std::mutex> lock(mtx_);
   // Sanity check
   if (attr == nullptr)
-    return LOG_STATUS(Status::ArraySchemaEvolutionError(
+    return LOG_STATUS(Status_ArraySchemaEvolutionError(
         "Cannot add attribute; Input attribute is null"));
 
   if (attributes_to_add_map_.find(attr->name()) !=
       attributes_to_add_map_.end()) {
-    return LOG_STATUS(Status::ArraySchemaEvolutionError(
+    return LOG_STATUS(Status_ArraySchemaEvolutionError(
         "Cannot add attribute; Input attribute name is already there"));
   }
 
@@ -150,7 +162,6 @@ Status ArraySchemaEvolution::drop_attribute(const std::string& attribute_name) {
   if (attributes_to_add_map_.find(attribute_name) !=
       attributes_to_add_map_.end()) {
     // Reset the pointer and erase it
-    attributes_to_add_map_[attribute_name].reset(nullptr);
     attributes_to_add_map_.erase(attribute_name);
   }
   return Status::Ok();
@@ -167,17 +178,31 @@ std::vector<std::string> ArraySchemaEvolution::attribute_names_to_drop() const {
   return names;
 }
 
+Status ArraySchemaEvolution::set_timestamp_range(
+    const std::pair<uint64_t, uint64_t>& timestamp_range) {
+  if (timestamp_range.first != timestamp_range.second) {
+    throw std::runtime_error(std::string(
+        "Cannot set timestamp range; first element " +
+        std::to_string(timestamp_range.first) + " and second element " +
+        std::to_string(timestamp_range.second) + " are not equal!"));
+  }
+  timestamp_range_ = timestamp_range;
+  return Status::Ok();
+}
+
+std::pair<uint64_t, uint64_t> ArraySchemaEvolution::timestamp_range() const {
+  return std::pair<uint64_t, uint64_t>(
+      timestamp_range_.first, timestamp_range_.second);
+}
+
 /* ****************************** */
 /*         PRIVATE METHODS        */
 /* ****************************** */
 
 void ArraySchemaEvolution::clear() {
-  for (auto& attr : attributes_to_add_map_) {
-    attr.second.reset(nullptr);
-  }
   attributes_to_add_map_.clear();
-
   attributes_to_drop_.clear();
+  timestamp_range_ = {0, 0};
 }
 
 }  // namespace sm

@@ -30,11 +30,13 @@
  * Tests the C API consolidation.
  */
 
-#include "catch.hpp"
-#include "test/src/helpers.h"
+#include <test/support/tdb_catch.h>
+#include "test/support/src/helpers.h"
+#include "tiledb/common/stdx_string.h"
 #include "tiledb/sm/c_api/tiledb.h"
 #include "tiledb/sm/enums/encryption_type.h"
-#include "tiledb/sm/misc/utils.h"
+#include "tiledb/sm/misc/tdb_time.h"
+#include "tiledb/storage_format/uri/parse_uri.h"
 
 #include <climits>
 #include <cstring>
@@ -46,11 +48,26 @@ using namespace tiledb::test;
 struct ConsolidationFx {
   // Constants
   const char* DENSE_VECTOR_NAME = "test_consolidate_dense_vector";
+  const char* DENSE_VECTOR_FRAG_DIR =
+      "test_consolidate_dense_vector/__fragments";
+  const char* DENSE_VECTOR_FRAG_META_DIR =
+      "test_consolidate_dense_vector/__fragment_meta";
   const char* DENSE_ARRAY_NAME = "test_consolidate_dense_array";
+  const char* DENSE_ARRAY_COMMITS_DIR =
+      "test_consolidate_dense_array/__commits";
+  const char* DENSE_ARRAY_FRAG_DIR = "test_consolidate_dense_array/__fragments";
   const char* SPARSE_ARRAY_NAME = "test_consolidate_sparse_array";
+  const char* SPARSE_ARRAY_COMMITS_DIR =
+      "test_consolidate_sparse_array/__commits";
+  const char* SPARSE_ARRAY_FRAG_DIR =
+      "test_consolidate_sparse_array/__fragments";
   const char* SPARSE_HETEROGENEOUS_ARRAY_NAME =
       "test_consolidate_sparse_heterogeneous_array";
   const char* SPARSE_STRING_ARRAY_NAME = "test_consolidate_sparse_string_array";
+  const char* SPARSE_STRING_ARRAY_FRAG_DIR =
+      "test_consolidate_sparse_string_array/__fragments";
+  const char* SPARSE_STRING_ARRAY_FRAG_META_DIR =
+      "test_consolidate_sparse_string_array/__fragment_meta";
 
   // TileDB context
   tiledb_ctx_t* ctx_;
@@ -79,17 +96,19 @@ struct ConsolidationFx {
   void write_dense_vector_del_2();
   void write_dense_vector_del_3();
   void write_dense_array_metadata();
-  void write_dense_full();
+  void write_dense_full(const bool serialized_writes);
   void write_dense_subarray(
+      const bool serialized_writes,
       uint64_t min1 = 3,
       uint64_t max1 = 4,
       uint64_t min2 = 3,
       uint64_t max2 = 4);
-  void write_sparse_full();
+  void write_sparse_full(const bool serialized_writes);
   void write_sparse_unordered();
-  void write_sparse_heterogeneous_full();
+  void write_sparse_row(uint64_t row_idx);
+  void write_sparse_heterogeneous_full(const bool serialized_writes);
   void write_sparse_heterogeneous_unordered();
-  void write_sparse_string_full();
+  void write_sparse_string_full(const bool serialized_writes);
   void write_sparse_string_unordered();
   void read_dense_array_metadata();
   void read_dense_vector(uint64_t timestamp = UINT64_MAX);
@@ -101,8 +120,10 @@ struct ConsolidationFx {
   void read_dense_vector_del_3();
   void read_dense_full_subarray();
   void read_dense_subarray_full();
+  void read_dense_four_tiles();
   void read_sparse_full_unordered();
   void read_sparse_unordered_full();
+  void read_sparse_rows();
   void read_sparse_heterogeneous_full_unordered();
   void read_sparse_heterogeneous_unordered_full();
   void read_sparse_string_full_unordered();
@@ -112,10 +133,14 @@ struct ConsolidationFx {
       const std::string& mode = "fragments",
       uint64_t start = 0,
       uint64_t end = UINT64_MAX);
-  void consolidate_sparse();
+  void consolidate_sparse(
+      const std::string& mode = "fragments",
+      uint64_t start = 0,
+      uint64_t end = UINT64_MAX);
   void consolidate_sparse_heterogeneous();
   void consolidate_sparse_string();
-  void vacuum_dense(
+  void vacuum_dense(const std::string& mode = "fragments");
+  void vacuum_sparse(
       const std::string& mode = "fragments",
       uint64_t start = 0,
       uint64_t end = UINT64_MAX);
@@ -126,6 +151,9 @@ struct ConsolidationFx {
   void remove_sparse_string_array();
   void remove_array(const std::string& array_name);
   bool is_array(const std::string& array_name);
+  void check_commits_dir_dense(int num_commits, int num_wrt, int num_ignore);
+  void check_commits_dir_sparse(int num_commits, int num_wrt, int num_ignore);
+  void check_ok_num(int num_ok);
   void get_array_meta_files_dense(std::vector<std::string>& files);
   void get_array_meta_vac_files_dense(std::vector<std::string>& files);
   void get_vac_files_dense(std::vector<std::string>& files);
@@ -139,10 +167,13 @@ struct ConsolidationFx {
 
   static int get_dir_num(const char* path, void* data);
   static int get_meta_num(const char* path, void* data);
+  static int get_commits_num(const char* path, void* data);
+  static int get_wrt_num(const char* path, void* data);
+  static int get_ignore_num(const char* path, void* data);
+  static int get_ok_num(const char* path, void* data);
   static int get_array_meta_files_callback(const char* path, void* data);
   static int get_array_meta_vac_files_callback(const char* path, void* data);
   static int get_vac_files_callback(const char* path, void* data);
-  static int get_fragment_timestamps(const char* path, void* data);
 };
 
 ConsolidationFx::ConsolidationFx() {
@@ -1553,7 +1584,7 @@ void ConsolidationFx::write_dense_array_metadata() {
   tiledb_array_free(&array);
 }
 
-void ConsolidationFx::write_dense_full() {
+void ConsolidationFx::write_dense_full(const bool serialized_writes) {
   // Set attributes
   const char* attributes[] = {"a1", "a2", "a3"};
 
@@ -1633,13 +1664,14 @@ void ConsolidationFx::write_dense_full() {
       ctx_, query, attributes[2], buffers[3], &buffer_sizes[3]);
   CHECK(rc == TILEDB_OK);
 
-  // Submit query
-  rc = tiledb_query_submit(ctx_, query);
-  CHECK(rc == TILEDB_OK);
-
-  // Finalize query
-  rc = tiledb_query_finalize(ctx_, query);
-  CHECK(rc == TILEDB_OK);
+  if (!serialized_writes) {
+    rc = tiledb_query_submit(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+    rc = tiledb_query_finalize(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+  } else {
+    submit_and_finalize_serialized_query(ctx_, query);
+  }
 
   // Close array
   rc = tiledb_array_close(ctx_, array);
@@ -1651,7 +1683,11 @@ void ConsolidationFx::write_dense_full() {
 }
 
 void ConsolidationFx::write_dense_subarray(
-    uint64_t min1, uint64_t max1, uint64_t min2, uint64_t max2) {
+    const bool serialized_writes,
+    uint64_t min1,
+    uint64_t max1,
+    uint64_t min2,
+    uint64_t max2) {
   // Prepare cell buffers
   int buffer_a1[] = {112, 113, 114, 115};
   uint64_t buffer_a2[] = {0, 1, 3, 6};
@@ -1714,13 +1750,14 @@ void ConsolidationFx::write_dense_subarray(
       ctx_, query, attributes[2], buffers[3], &buffer_sizes[3]);
   CHECK(rc == TILEDB_OK);
 
-  // Submit query
-  rc = tiledb_query_submit(ctx_, query);
-  CHECK(rc == TILEDB_OK);
-
-  // Finalize query
-  rc = tiledb_query_finalize(ctx_, query);
-  CHECK(rc == TILEDB_OK);
+  if (!serialized_writes) {
+    rc = tiledb_query_submit(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+    rc = tiledb_query_finalize(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+  } else {
+    submit_and_finalize_serialized_query(ctx_, query);
+  }
 
   // Close array
   rc = tiledb_array_close(ctx_, array);
@@ -1731,7 +1768,7 @@ void ConsolidationFx::write_dense_subarray(
   tiledb_query_free(&query);
 }
 
-void ConsolidationFx::write_sparse_full() {
+void ConsolidationFx::write_sparse_full(const bool serialized_writes) {
   // Prepare cell buffers
   int buffer_a1[] = {0, 1, 2, 3, 4, 5, 6, 7};
   uint64_t buffer_a2[] = {0, 1, 3, 6, 10, 11, 13, 16};
@@ -1820,13 +1857,14 @@ void ConsolidationFx::write_sparse_full() {
       ctx_, query, attributes[4], buffers[5], &buffer_sizes[4]);
   CHECK(rc == TILEDB_OK);
 
-  // Submit query
-  rc = tiledb_query_submit(ctx_, query);
-  CHECK(rc == TILEDB_OK);
-
-  // Finalize query
-  rc = tiledb_query_finalize(ctx_, query);
-  CHECK(rc == TILEDB_OK);
+  if (!serialized_writes) {
+    rc = tiledb_query_submit(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+    rc = tiledb_query_finalize(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+  } else {
+    submit_and_finalize_serialized_query(ctx_, query);
+  }
 
   // Close array
   rc = tiledb_array_close(ctx_, array);
@@ -1929,7 +1967,103 @@ void ConsolidationFx::write_sparse_unordered() {
   tiledb_query_free(&query);
 }
 
-void ConsolidationFx::write_sparse_heterogeneous_full() {
+void ConsolidationFx::write_sparse_row(uint64_t row_idx) {
+  // Prepare cell buffers
+  int buffer_a1[] = {
+      11, 12, 13, 14, 21, 22, 23, 24, 31, 32, 33, 34, 41, 42, 43, 44};
+  uint64_t buffer_a2[] = {0, 1, 2, 3};
+  char buffer_var_a2[] = "abcdefghijklmnop";
+  float buffer_a3[] = {11.1f, 11.2f, 12.1f, 12.2f, 13.1f, 13.2f, 14.1f, 14.2f,
+                       21.1f, 21.2f, 22.1f, 22.2f, 23.1f, 23.2f, 24.1f, 24.2f,
+                       31.1f, 31.2f, 32.1f, 32.2f, 33.1f, 33.2f, 34.1f, 34.2f,
+                       41.1f, 41.2f, 42.1f, 42.2f, 43.1f, 43.2f, 44.1f, 44.2f};
+  uint64_t buffer_coords_dim1[] = {
+      row_idx + 1, row_idx + 1, row_idx + 1, row_idx + 1};
+  uint64_t buffer_coords_dim2[] = {1, 2, 3, 4};
+
+  void* buffers[] = {buffer_a1 + 4 * row_idx,
+                     buffer_a2,
+                     buffer_var_a2 + 4 * row_idx,
+                     buffer_a3 + 8 * row_idx,
+                     buffer_coords_dim1,
+                     buffer_coords_dim2};
+  uint64_t buffer_sizes[] = {4 * sizeof(int),
+                             4 * sizeof(uint64_t),
+                             4 * sizeof(char),
+                             8 * sizeof(float),
+                             sizeof(buffer_coords_dim1)};
+
+  // Open array
+  tiledb_array_t* array;
+  int rc = tiledb_array_alloc(ctx_, SPARSE_ARRAY_NAME, &array);
+  CHECK(rc == TILEDB_OK);
+  if (encryption_type_ != TILEDB_NO_ENCRYPTION) {
+    tiledb_config_t* cfg;
+    tiledb_error_t* err = nullptr;
+    rc = tiledb_config_alloc(&cfg, &err);
+    REQUIRE(rc == TILEDB_OK);
+    REQUIRE(err == nullptr);
+    std::string encryption_type_string =
+        encryption_type_str((tiledb::sm::EncryptionType)encryption_type_);
+    rc = tiledb_config_set(
+        cfg, "sm.encryption_type", encryption_type_string.c_str(), &err);
+    REQUIRE(rc == TILEDB_OK);
+    REQUIRE(err == nullptr);
+    rc = tiledb_config_set(cfg, "sm.encryption_key", encryption_key_, &err);
+    REQUIRE(rc == TILEDB_OK);
+    REQUIRE(err == nullptr);
+    rc = tiledb_array_set_config(ctx_, array, cfg);
+    REQUIRE(rc == TILEDB_OK);
+    tiledb_config_free(&cfg);
+  }
+  rc = tiledb_array_open(ctx_, array, TILEDB_WRITE);
+  REQUIRE(rc == TILEDB_OK);
+
+  // Create query
+  tiledb_query_t* query;
+  const char* attributes[] = {"a1", "a2", "a3", "d1", "d2"};
+  rc = tiledb_query_alloc(ctx_, array, TILEDB_WRITE, &query);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_layout(ctx_, query, TILEDB_UNORDERED);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(
+      ctx_, query, attributes[0], buffers[0], &buffer_sizes[0]);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(
+      ctx_, query, attributes[1], buffers[2], &buffer_sizes[2]);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_offsets_buffer(
+      ctx_, query, attributes[1], (uint64_t*)buffers[1], &buffer_sizes[1]);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(
+      ctx_, query, attributes[2], buffers[3], &buffer_sizes[3]);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(
+      ctx_, query, attributes[3], buffers[4], &buffer_sizes[4]);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(
+      ctx_, query, attributes[4], buffers[5], &buffer_sizes[4]);
+  CHECK(rc == TILEDB_OK);
+
+  // Submit query
+  rc = tiledb_query_submit(ctx_, query);
+  CHECK(rc == TILEDB_OK);
+
+  // Finalize query
+  rc = tiledb_query_finalize(ctx_, query);
+  CHECK(rc == TILEDB_OK);
+
+  // Close array
+  rc = tiledb_array_close(ctx_, array);
+  CHECK(rc == TILEDB_OK);
+
+  // Clean up
+  tiledb_array_free(&array);
+  tiledb_query_free(&query);
+}
+
+void ConsolidationFx::write_sparse_heterogeneous_full(
+    const bool serialized_writes) {
   // Prepare cell buffers
   int buffer_a1[] = {0, 1, 2, 3, 4, 5, 6, 7};
   uint64_t buffer_a2[] = {0, 1, 3, 6, 10, 11, 13, 16};
@@ -2019,13 +2153,14 @@ void ConsolidationFx::write_sparse_heterogeneous_full() {
       ctx_, query, attributes[4], buffers[5], &buffer_sizes[5]);
   CHECK(rc == TILEDB_OK);
 
-  // Submit query
-  rc = tiledb_query_submit(ctx_, query);
-  CHECK(rc == TILEDB_OK);
-
-  // Finalize query
-  rc = tiledb_query_finalize(ctx_, query);
-  CHECK(rc == TILEDB_OK);
+  if (!serialized_writes) {
+    rc = tiledb_query_submit(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+    rc = tiledb_query_finalize(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+  } else {
+    submit_and_finalize_serialized_query(ctx_, query);
+  }
 
   // Close array
   rc = tiledb_array_close(ctx_, array);
@@ -2129,7 +2264,7 @@ void ConsolidationFx::write_sparse_heterogeneous_unordered() {
   tiledb_query_free(&query);
 }
 
-void ConsolidationFx::write_sparse_string_full() {
+void ConsolidationFx::write_sparse_string_full(const bool serialized_writes) {
   // Prepare cell buffers
   int buffer_a1[] = {0, 1, 2, 3, 4, 6, 7, 5};
   uint64_t buffer_a2[] = {0, 1, 3, 6, 10, 11, 14, 18};
@@ -2227,13 +2362,14 @@ void ConsolidationFx::write_sparse_string_full() {
       ctx_, query, attributes[4], (uint64_t*)buffers[5], &buffer_sizes[5]);
   CHECK(rc == TILEDB_OK);
 
-  // Submit query
-  rc = tiledb_query_submit(ctx_, query);
-  CHECK(rc == TILEDB_OK);
-
-  // Finalize query
-  rc = tiledb_query_finalize(ctx_, query);
-  CHECK(rc == TILEDB_OK);
+  if (!serialized_writes) {
+    rc = tiledb_query_submit(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+    rc = tiledb_query_finalize(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+  } else {
+    submit_and_finalize_serialized_query(ctx_, query);
+  }
 
   // Close array
   rc = tiledb_array_close(ctx_, array);
@@ -3120,6 +3256,133 @@ void ConsolidationFx::read_dense_subarray_full() {
   free(buffer_a3);
 }
 
+void ConsolidationFx::read_dense_four_tiles() {
+  // Correct buffers
+  int c_buffer_a1[] = {112,
+                       113,
+                       114,
+                       115,
+                       112,
+                       113,
+                       114,
+                       115,
+                       112,
+                       113,
+                       114,
+                       115,
+                       112,
+                       113,
+                       114,
+                       115};
+  uint64_t c_buffer_a2_off[] = {
+      0, 1, 3, 6, 10, 11, 13, 16, 20, 21, 23, 26, 30, 31, 33, 36};
+  char c_buffer_a2_val[] =
+      "MNNOOOPPPP"
+      "MNNOOOPPPP"
+      "MNNOOOPPPP"
+      "MNNOOOPPPP";
+  float c_buffer_a3[] = {
+      112.1f, 112.2f, 113.1f, 113.2f, 114.1f, 114.2f, 115.1f, 115.2f,
+      112.1f, 112.2f, 113.1f, 113.2f, 114.1f, 114.2f, 115.1f, 115.2f,
+      112.1f, 112.2f, 113.1f, 113.2f, 114.1f, 114.2f, 115.1f, 115.2f,
+      112.1f, 112.2f, 113.1f, 113.2f, 114.1f, 114.2f, 115.1f, 115.2f,
+  };
+
+  // Open array
+  tiledb_array_t* array;
+  int rc = tiledb_array_alloc(ctx_, DENSE_ARRAY_NAME, &array);
+  CHECK(rc == TILEDB_OK);
+  if (encryption_type_ != TILEDB_NO_ENCRYPTION) {
+    tiledb_config_t* cfg;
+    tiledb_error_t* err = nullptr;
+    rc = tiledb_config_alloc(&cfg, &err);
+    REQUIRE(rc == TILEDB_OK);
+    REQUIRE(err == nullptr);
+    std::string encryption_type_string =
+        encryption_type_str((tiledb::sm::EncryptionType)encryption_type_);
+    rc = tiledb_config_set(
+        cfg, "sm.encryption_type", encryption_type_string.c_str(), &err);
+    REQUIRE(rc == TILEDB_OK);
+    REQUIRE(err == nullptr);
+    rc = tiledb_config_set(cfg, "sm.encryption_key", encryption_key_, &err);
+    REQUIRE(rc == TILEDB_OK);
+    REQUIRE(err == nullptr);
+    rc = tiledb_array_set_config(ctx_, array, cfg);
+    REQUIRE(rc == TILEDB_OK);
+    tiledb_config_free(&cfg);
+  }
+  rc = tiledb_array_open(ctx_, array, TILEDB_READ);
+  REQUIRE(rc == TILEDB_OK);
+
+  // Compute max buffer sizes
+  uint64_t subarray[] = {1, 4, 1, 4};
+  uint64_t buffer_a1_size = 64;
+  uint64_t buffer_a2_off_size = 128;
+  uint64_t buffer_a2_val_size = 114;
+  uint64_t buffer_a3_size = 128;
+
+  // Prepare cell buffers
+  auto buffer_a1 = (int*)malloc(buffer_a1_size);
+  auto buffer_a2_off = (uint64_t*)malloc(buffer_a2_off_size);
+  auto buffer_a2_val = (char*)malloc(buffer_a2_val_size);
+  auto buffer_a3 = (float*)malloc(buffer_a3_size);
+
+  // Create query
+  tiledb_query_t* query;
+  rc = tiledb_query_alloc(ctx_, array, TILEDB_READ, &query);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_layout(ctx_, query, TILEDB_GLOBAL_ORDER);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_subarray(ctx_, query, subarray);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(
+      ctx_, query, "a1", buffer_a1, &buffer_a1_size);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(
+      ctx_, query, "a2", buffer_a2_val, &buffer_a2_val_size);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_offsets_buffer(
+      ctx_, query, "a2", buffer_a2_off, &buffer_a2_off_size);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(
+      ctx_, query, "a3", buffer_a3, &buffer_a3_size);
+  CHECK(rc == TILEDB_OK);
+
+  // Submit query
+  rc = tiledb_query_submit(ctx_, query);
+  CHECK(rc == TILEDB_OK);
+
+  tiledb_query_status_t status;
+  rc = tiledb_query_get_status(ctx_, query, &status);
+  CHECK(status == TILEDB_COMPLETED);
+
+  // Finalize query
+  rc = tiledb_query_finalize(ctx_, query);
+  CHECK(rc == TILEDB_OK);
+
+  // Check buffers
+  CHECK(sizeof(c_buffer_a1) == buffer_a1_size);
+  CHECK(sizeof(c_buffer_a2_off) == buffer_a2_off_size);
+  CHECK(sizeof(c_buffer_a2_val) - 1 == buffer_a2_val_size);
+  CHECK(sizeof(c_buffer_a3) == buffer_a3_size);
+  CHECK(!memcmp(buffer_a1, c_buffer_a1, sizeof(c_buffer_a1)));
+  CHECK(!memcmp(buffer_a2_off, c_buffer_a2_off, sizeof(c_buffer_a2_off)));
+  CHECK(!memcmp(buffer_a2_val, c_buffer_a2_val, sizeof(c_buffer_a2_val) - 1));
+  CHECK(!memcmp(buffer_a3, c_buffer_a3, sizeof(c_buffer_a3)));
+
+  // Close array
+  rc = tiledb_array_close(ctx_, array);
+  CHECK(rc == TILEDB_OK);
+
+  // Clean up
+  tiledb_array_free(&array);
+  tiledb_query_free(&query);
+  free(buffer_a1);
+  free(buffer_a2_off);
+  free(buffer_a2_val);
+  free(buffer_a3);
+}
+
 void ConsolidationFx::read_sparse_full_unordered() {
   // Correct buffers
   int c_buffer_a1[] = {0, 1, 2, 3, 4, 104, 105, 5, 106, 107};
@@ -3289,6 +3552,123 @@ void ConsolidationFx::read_sparse_unordered_full() {
   rc = tiledb_query_alloc(ctx_, array, TILEDB_READ, &query);
   CHECK(rc == TILEDB_OK);
   rc = tiledb_query_set_layout(ctx_, query, TILEDB_GLOBAL_ORDER);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(
+      ctx_, query, "a1", buffer_a1, &buffer_a1_size);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(
+      ctx_, query, "a2", buffer_a2_val, &buffer_a2_val_size);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_offsets_buffer(
+      ctx_, query, "a2", buffer_a2_off, &buffer_a2_off_size);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(
+      ctx_, query, "a3", buffer_a3, &buffer_a3_size);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(
+      ctx_, query, "d1", buffer_coords_dim1, &buffer_coords_dim1_size);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(
+      ctx_, query, "d2", buffer_coords_dim2, &buffer_coords_dim2_size);
+  CHECK(rc == TILEDB_OK);
+
+  // Submit query
+  rc = tiledb_query_submit(ctx_, query);
+  CHECK(rc == TILEDB_OK);
+
+  // Finalize query
+  rc = tiledb_query_finalize(ctx_, query);
+  CHECK(rc == TILEDB_OK);
+
+  // Check buffers
+  CHECK(!memcmp(buffer_a1, c_buffer_a1, sizeof(c_buffer_a1)));
+  CHECK(!memcmp(buffer_a2_off, c_buffer_a2_off, sizeof(c_buffer_a2_off)));
+  CHECK(!memcmp(buffer_a2_val, c_buffer_a2_val, sizeof(c_buffer_a2_val) - 1));
+  CHECK(!memcmp(buffer_a3, c_buffer_a3, sizeof(c_buffer_a3)));
+  CHECK(!memcmp(
+      buffer_coords_dim1, c_buffer_coords_dim1, sizeof(c_buffer_coords_dim1)));
+  CHECK(!memcmp(
+      buffer_coords_dim2, c_buffer_coords_dim2, sizeof(c_buffer_coords_dim2)));
+
+  // Close array
+  rc = tiledb_array_close(ctx_, array);
+  CHECK(rc == TILEDB_OK);
+
+  // Clean up
+  tiledb_array_free(&array);
+  tiledb_query_free(&query);
+  free(buffer_a1);
+  free(buffer_a2_off);
+  free(buffer_a2_val);
+  free(buffer_a3);
+  free(buffer_coords_dim1);
+  free(buffer_coords_dim2);
+}
+
+void ConsolidationFx::read_sparse_rows() {
+  // Correct buffers
+  int c_buffer_a1[] = {
+      11, 12, 13, 14, 21, 22, 23, 24, 31, 32, 33, 34, 41, 42, 43, 44};
+  uint64_t c_buffer_a2_off[] = {
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+  char c_buffer_a2_val[] = "abcdefghijklmnop";
+  float c_buffer_a3[] = {11.1f, 11.2f, 12.1f, 12.2f, 13.1f, 13.2f, 14.1f,
+                         14.2f, 21.1f, 21.2f, 22.1f, 22.2f, 23.1f, 23.2f,
+                         24.1f, 24.2f, 31.1f, 31.2f, 32.1f, 32.2f, 33.1f,
+                         33.2f, 34.1f, 34.2f, 41.1f, 41.2f, 42.1f, 42.2f,
+                         43.1f, 43.2f, 44.1f, 44.2f};
+  uint64_t c_buffer_coords_dim1[] = {
+      1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4};
+  uint64_t c_buffer_coords_dim2[] = {
+      1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4, 1, 2, 3, 4};
+
+  // Open array
+  tiledb_array_t* array;
+  int rc = tiledb_array_alloc(ctx_, SPARSE_ARRAY_NAME, &array);
+  CHECK(rc == TILEDB_OK);
+  if (encryption_type_ != TILEDB_NO_ENCRYPTION) {
+    tiledb_config_t* cfg;
+    tiledb_error_t* err = nullptr;
+    rc = tiledb_config_alloc(&cfg, &err);
+    REQUIRE(rc == TILEDB_OK);
+    REQUIRE(err == nullptr);
+    std::string encryption_type_string =
+        encryption_type_str((tiledb::sm::EncryptionType)encryption_type_);
+    rc = tiledb_config_set(
+        cfg, "sm.encryption_type", encryption_type_string.c_str(), &err);
+    REQUIRE(rc == TILEDB_OK);
+    REQUIRE(err == nullptr);
+    rc = tiledb_config_set(cfg, "sm.encryption_key", encryption_key_, &err);
+    REQUIRE(rc == TILEDB_OK);
+    REQUIRE(err == nullptr);
+    rc = tiledb_array_set_config(ctx_, array, cfg);
+    REQUIRE(rc == TILEDB_OK);
+    tiledb_config_free(&cfg);
+  }
+  rc = tiledb_array_open(ctx_, array, TILEDB_READ);
+  REQUIRE(rc == TILEDB_OK);
+
+  // Compute max buffer sizes
+  uint64_t buffer_a1_size = 16 * sizeof(int);
+  uint64_t buffer_a2_off_size = 16 * sizeof(uint64_t);
+  uint64_t buffer_a2_val_size = 16 * sizeof(char);
+  uint64_t buffer_a3_size = 32 * sizeof(float);
+  uint64_t buffer_coords_dim1_size = 16 * sizeof(uint64_t);
+  uint64_t buffer_coords_dim2_size = 16 * sizeof(uint64_t);
+
+  // Prepare cell buffers
+  auto buffer_a1 = (int*)malloc(buffer_a1_size);
+  auto buffer_a2_off = (uint64_t*)malloc(buffer_a2_off_size);
+  auto buffer_a2_val = (char*)malloc(buffer_a2_val_size);
+  auto buffer_a3 = (float*)malloc(buffer_a3_size);
+  auto buffer_coords_dim1 = (uint64_t*)malloc(buffer_coords_dim1_size);
+  auto buffer_coords_dim2 = (uint64_t*)malloc(buffer_coords_dim2_size);
+
+  // Create query
+  tiledb_query_t* query;
+  rc = tiledb_query_alloc(ctx_, array, TILEDB_READ, &query);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_set_layout(ctx_, query, TILEDB_ROW_MAJOR);
   CHECK(rc == TILEDB_OK);
   rc = tiledb_query_set_data_buffer(
       ctx_, query, "a1", buffer_a1, &buffer_a1_size);
@@ -3854,6 +4234,10 @@ void ConsolidationFx::consolidate_dense(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(err == nullptr);
 
+  rc = tiledb_config_set(cfg, "sm.consolidation.buffer_size", "10000", &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+
   if (encryption_type_ != TILEDB_NO_ENCRYPTION) {
     std::string encryption_type_string =
         encryption_type_str((tiledb::sm::EncryptionType)encryption_type_);
@@ -3869,14 +4253,33 @@ void ConsolidationFx::consolidate_dense(
   tiledb_config_free(&cfg);
 }
 
-void ConsolidationFx::consolidate_sparse() {
+void ConsolidationFx::consolidate_sparse(
+    const std::string& mode, uint64_t start, uint64_t end) {
   int rc;
+  tiledb_config_t* cfg;
+  tiledb_error_t* err = nullptr;
+  REQUIRE(tiledb_config_alloc(&cfg, &err) == TILEDB_OK);
+  REQUIRE(err == nullptr);
+  rc = tiledb_config_set(cfg, "sm.consolidation.mode", mode.c_str(), &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+  rc = tiledb_config_set(
+      cfg,
+      "sm.consolidation.timestamp_start",
+      std::to_string(start).c_str(),
+      &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+  rc = tiledb_config_set(
+      cfg, "sm.consolidation.timestamp_end", std::to_string(end).c_str(), &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+
+  rc = tiledb_config_set(cfg, "sm.consolidation.buffer_size", "10000", &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+
   if (encryption_type_ != TILEDB_NO_ENCRYPTION) {
-    tiledb_config_t* cfg;
-    tiledb_error_t* err = nullptr;
-    rc = tiledb_config_alloc(&cfg, &err);
-    REQUIRE(rc == TILEDB_OK);
-    REQUIRE(err == nullptr);
     std::string encryption_type_string =
         encryption_type_str((tiledb::sm::EncryptionType)encryption_type_);
     rc = tiledb_config_set(
@@ -3885,22 +4288,26 @@ void ConsolidationFx::consolidate_sparse() {
     rc = tiledb_config_set(cfg, "sm.encryption_key", encryption_key_, &err);
     REQUIRE(rc == TILEDB_OK);
     REQUIRE(err == nullptr);
-    rc = tiledb_array_consolidate(ctx_, SPARSE_ARRAY_NAME, cfg);
-    tiledb_config_free(&cfg);
-  } else {
-    rc = tiledb_array_consolidate(ctx_, SPARSE_ARRAY_NAME, nullptr);
   }
+  rc = tiledb_array_consolidate(ctx_, SPARSE_ARRAY_NAME, cfg);
   REQUIRE(rc == TILEDB_OK);
+  tiledb_config_free(&cfg);
 }
 
 void ConsolidationFx::consolidate_sparse_heterogeneous() {
   int rc;
+  tiledb_config_t* cfg;
+  tiledb_error_t* err = nullptr;
+
+  rc = tiledb_config_alloc(&cfg, &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+
+  rc = tiledb_config_set(cfg, "sm.consolidation.buffer_size", "10000", &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+
   if (encryption_type_ != TILEDB_NO_ENCRYPTION) {
-    tiledb_config_t* cfg;
-    tiledb_error_t* err = nullptr;
-    rc = tiledb_config_alloc(&cfg, &err);
-    REQUIRE(rc == TILEDB_OK);
-    REQUIRE(err == nullptr);
     std::string encryption_type_string =
         encryption_type_str((tiledb::sm::EncryptionType)encryption_type_);
     rc = tiledb_config_set(
@@ -3912,20 +4319,28 @@ void ConsolidationFx::consolidate_sparse_heterogeneous() {
     rc = tiledb_array_consolidate(ctx_, SPARSE_HETEROGENEOUS_ARRAY_NAME, cfg);
     tiledb_config_free(&cfg);
   } else {
-    rc = tiledb_array_consolidate(
-        ctx_, SPARSE_HETEROGENEOUS_ARRAY_NAME, nullptr);
+    rc = tiledb_array_consolidate(ctx_, SPARSE_HETEROGENEOUS_ARRAY_NAME, cfg);
   }
+
+  tiledb_config_free(&cfg);
   REQUIRE(rc == TILEDB_OK);
 }
 
 void ConsolidationFx::consolidate_sparse_string() {
   int rc;
+
+  tiledb_config_t* cfg;
+  tiledb_error_t* err = nullptr;
+
+  rc = tiledb_config_alloc(&cfg, &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+
+  rc = tiledb_config_set(cfg, "sm.consolidation.buffer_size", "10000", &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+
   if (encryption_type_ != TILEDB_NO_ENCRYPTION) {
-    tiledb_config_t* cfg;
-    tiledb_error_t* err = nullptr;
-    rc = tiledb_config_alloc(&cfg, &err);
-    REQUIRE(rc == TILEDB_OK);
-    REQUIRE(err == nullptr);
     std::string encryption_type_string =
         encryption_type_str((tiledb::sm::EncryptionType)encryption_type_);
     rc = tiledb_config_set(
@@ -3937,12 +4352,29 @@ void ConsolidationFx::consolidate_sparse_string() {
     rc = tiledb_array_consolidate(ctx_, SPARSE_STRING_ARRAY_NAME, cfg);
     tiledb_config_free(&cfg);
   } else {
-    rc = tiledb_array_consolidate(ctx_, SPARSE_STRING_ARRAY_NAME, nullptr);
+    rc = tiledb_array_consolidate(ctx_, SPARSE_STRING_ARRAY_NAME, cfg);
   }
+
+  tiledb_config_free(&cfg);
   REQUIRE(rc == TILEDB_OK);
 }
 
-void ConsolidationFx::vacuum_dense(
+void ConsolidationFx::vacuum_dense(const std::string& mode) {
+  int rc;
+  tiledb_config_t* cfg;
+  tiledb_error_t* err = nullptr;
+  REQUIRE(tiledb_config_alloc(&cfg, &err) == TILEDB_OK);
+  REQUIRE(err == nullptr);
+  rc = tiledb_config_set(cfg, "sm.vacuum.mode", mode.c_str(), &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+  rc = tiledb_array_vacuum(ctx_, DENSE_ARRAY_NAME, cfg);
+  REQUIRE(rc == TILEDB_OK);
+
+  tiledb_config_free(&cfg);
+}
+
+void ConsolidationFx::vacuum_sparse(
     const std::string& mode, uint64_t start, uint64_t end) {
   int rc;
   tiledb_config_t* cfg;
@@ -3961,7 +4393,7 @@ void ConsolidationFx::vacuum_dense(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(err == nullptr);
 
-  rc = tiledb_array_vacuum(ctx_, DENSE_ARRAY_NAME, cfg);
+  rc = tiledb_array_vacuum(ctx_, SPARSE_ARRAY_NAME, cfg);
   REQUIRE(rc == TILEDB_OK);
 
   tiledb_config_free(&cfg);
@@ -4000,23 +4432,92 @@ bool ConsolidationFx::is_array(const std::string& array_name) {
   return type == TILEDB_ARRAY;
 }
 
+void ConsolidationFx::check_commits_dir_dense(
+    int num_commits, int num_wrt, int num_ignore) {
+  int32_t rc;
+  get_num_struct data;
+
+  // Check number of consolidated commits files
+  data = {ctx_, vfs_, 0};
+  rc = tiledb_vfs_ls(
+      ctx_, vfs_, DENSE_ARRAY_COMMITS_DIR, &get_commits_num, &data);
+  CHECK(rc == TILEDB_OK);
+  CHECK(data.num == num_commits);
+
+  // Check number of wrt files
+  data = {ctx_, vfs_, 0};
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_ARRAY_COMMITS_DIR, &get_wrt_num, &data);
+  CHECK(rc == TILEDB_OK);
+  CHECK(data.num == num_wrt);
+
+  // Check number of ignore files
+  data = {ctx_, vfs_, 0};
+  rc = tiledb_vfs_ls(
+      ctx_, vfs_, DENSE_ARRAY_COMMITS_DIR, &get_ignore_num, &data);
+  CHECK(rc == TILEDB_OK);
+  CHECK(data.num == num_ignore);
+}
+
+void ConsolidationFx::check_commits_dir_sparse(
+    int num_commits, int num_wrt, int num_ignore) {
+  int32_t rc;
+  get_num_struct data;
+
+  // Check number of consolidated commits files
+  data = {ctx_, vfs_, 0};
+  rc = tiledb_vfs_ls(
+      ctx_, vfs_, SPARSE_ARRAY_COMMITS_DIR, &get_commits_num, &data);
+  CHECK(rc == TILEDB_OK);
+  CHECK(data.num == num_commits);
+
+  // Check number of wrt files
+  data = {ctx_, vfs_, 0};
+  rc = tiledb_vfs_ls(ctx_, vfs_, SPARSE_ARRAY_COMMITS_DIR, &get_wrt_num, &data);
+  CHECK(rc == TILEDB_OK);
+  CHECK(data.num == num_wrt);
+
+  // Check number of ignore files
+  data = {ctx_, vfs_, 0};
+  rc = tiledb_vfs_ls(
+      ctx_, vfs_, SPARSE_ARRAY_COMMITS_DIR, &get_ignore_num, &data);
+  CHECK(rc == TILEDB_OK);
+  CHECK(data.num == num_ignore);
+}
+
+void ConsolidationFx::check_ok_num(int num_ok) {
+  int32_t rc;
+  get_num_struct data;
+
+  // Check number of ok files
+  data = {ctx_, vfs_, 0};
+  rc = tiledb_vfs_ls(ctx_, vfs_, SPARSE_ARRAY_NAME, &get_ok_num, &data);
+  CHECK(rc == TILEDB_OK);
+  CHECK(data.num == num_ok);
+}
+
 TEST_CASE_METHOD(
     ConsolidationFx,
     "C API: Test consolidation, dense",
     "[capi][consolidation][dense]") {
+#ifdef TILEDB_SERIALIZATION
+  bool serialized_writes = GENERATE(true, false);
+#else
+  bool serialized_writes = false;
+#endif
+
   remove_dense_array();
   create_dense_array();
 
   SECTION("- write full, subarray") {
-    write_dense_full();
-    write_dense_subarray();
+    write_dense_full(serialized_writes);
+    write_dense_subarray(serialized_writes);
     consolidate_dense();
     read_dense_full_subarray();
   }
 
   SECTION("- write subarray, full") {
-    write_dense_subarray();
-    write_dense_full();
+    write_dense_subarray(serialized_writes);
+    write_dense_full(serialized_writes);
     consolidate_dense();
     read_dense_subarray_full();
   }
@@ -4026,8 +4527,8 @@ TEST_CASE_METHOD(
     encryption_type_ = TILEDB_AES_256_GCM;
     encryption_key_ = "0123456789abcdeF0123456789abcdeF";
     create_dense_array();
-    write_dense_subarray();
-    write_dense_full();
+    write_dense_subarray(serialized_writes);
+    write_dense_full(serialized_writes);
     consolidate_dense();
     read_dense_subarray_full();
   }
@@ -4039,11 +4540,17 @@ TEST_CASE_METHOD(
     ConsolidationFx,
     "C API: Test consolidation, sparse",
     "[capi][consolidation][sparse]") {
+#ifdef TILEDB_SERIALIZATION
+  bool serialized_writes = GENERATE(true, false);
+#else
+  bool serialized_writes = false;
+#endif
+
   remove_sparse_array();
   create_sparse_array();
 
   SECTION("- write full, unordered") {
-    write_sparse_full();
+    write_sparse_full(serialized_writes);
     write_sparse_unordered();
     consolidate_sparse();
     read_sparse_full_unordered();
@@ -4051,7 +4558,7 @@ TEST_CASE_METHOD(
 
   SECTION("- write unordered, full") {
     write_sparse_unordered();
-    write_sparse_full();
+    write_sparse_full(serialized_writes);
     consolidate_sparse();
     read_sparse_unordered_full();
   }
@@ -4062,7 +4569,7 @@ TEST_CASE_METHOD(
     encryption_key_ = "0123456789abcdeF0123456789abcdeF";
     create_sparse_array();
     write_sparse_unordered();
-    write_sparse_full();
+    write_sparse_full(serialized_writes);
     consolidate_sparse();
     read_sparse_unordered_full();
   }
@@ -4077,15 +4584,7 @@ int ConsolidationFx::get_dir_num(const char* path, void* data) {
   int is_dir;
   int rc = tiledb_vfs_is_dir(ctx, vfs, path, &is_dir);
   CHECK(rc == TILEDB_OK);
-  auto meta_dir =
-      std::string("/") + tiledb::sm::constants::array_metadata_folder_name;
-  auto schema_dir =
-      std::string("/") + tiledb::sm::constants::array_schema_folder_name;
-  if (!tiledb::sm::utils::parse::ends_with(path, meta_dir) &&
-      !tiledb::sm::utils::parse::ends_with(path, schema_dir)) {
-    // Ignoring the meta folder and the schema folder
-    data_struct->num += is_dir;
-  }
+  data_struct->num += is_dir;
 
   return 1;
 }
@@ -4094,6 +4593,42 @@ int ConsolidationFx::get_meta_num(const char* path, void* data) {
   auto data_struct = (ConsolidationFx::get_num_struct*)data;
   if (tiledb::sm::utils::parse::ends_with(
           path, tiledb::sm::constants::meta_file_suffix))
+    ++data_struct->num;
+
+  return 1;
+}
+
+int ConsolidationFx::get_commits_num(const char* path, void* data) {
+  auto data_struct = (ConsolidationFx::get_num_struct*)data;
+  if (tiledb::sm::utils::parse::ends_with(
+          path, tiledb::sm::constants::con_commits_file_suffix))
+    ++data_struct->num;
+
+  return 1;
+}
+
+int ConsolidationFx::get_wrt_num(const char* path, void* data) {
+  auto data_struct = (ConsolidationFx::get_num_struct*)data;
+  if (tiledb::sm::utils::parse::ends_with(
+          path, tiledb::sm::constants::write_file_suffix))
+    ++data_struct->num;
+
+  return 1;
+}
+
+int ConsolidationFx::get_ignore_num(const char* path, void* data) {
+  auto data_struct = (ConsolidationFx::get_num_struct*)data;
+  if (tiledb::sm::utils::parse::ends_with(
+          path, tiledb::sm::constants::ignore_file_suffix))
+    ++data_struct->num;
+
+  return 1;
+}
+
+int ConsolidationFx::get_ok_num(const char* path, void* data) {
+  auto data_struct = (ConsolidationFx::get_num_struct*)data;
+  if (tiledb::sm::utils::parse::ends_with(
+          path, tiledb::sm::constants::ok_file_suffix))
     ++data_struct->num;
 
   return 1;
@@ -4128,20 +4663,6 @@ int ConsolidationFx::get_vac_files_callback(const char* path, void* data) {
   return 1;
 }
 
-int ConsolidationFx::get_fragment_timestamps(const char* path, void* data) {
-  auto data_vec = (std::vector<uint64_t>*)data;
-  std::pair<uint64_t, uint64_t> timestamp_range;
-  if (tiledb::sm::utils::parse::ends_with(
-          path, tiledb::sm::constants::ok_file_suffix)) {
-    auto uri = tiledb::sm::URI(path);
-    if (tiledb::sm::utils::parse::get_timestamp_range(uri, &timestamp_range)
-            .ok())
-      data_vec->push_back(timestamp_range.first);
-  }
-
-  return 1;
-}
-
 void ConsolidationFx::get_array_meta_files_dense(
     std::vector<std::string>& files) {
   files.clear();
@@ -4150,7 +4671,7 @@ void ConsolidationFx::get_array_meta_files_dense(
       ctx_,
       vfs_,
       dense_array_uri.add_trailing_slash()
-          .join_path(tiledb::sm::constants::array_metadata_folder_name)
+          .join_path(tiledb::sm::constants::array_metadata_dir_name)
           .c_str(),
       &get_array_meta_files_callback,
       &files);
@@ -4165,7 +4686,7 @@ void ConsolidationFx::get_array_meta_vac_files_dense(
       ctx_,
       vfs_,
       dense_array_uri.add_trailing_slash()
-          .join_path(tiledb::sm::constants::array_metadata_folder_name)
+          .join_path(tiledb::sm::constants::array_metadata_dir_name)
           .c_str(),
       &get_array_meta_vac_files_callback,
       &files);
@@ -4219,6 +4740,17 @@ TEST_CASE_METHOD(
   tiledb_error_free(&error);
   rc = tiledb_config_set(
       config, "sm.consolidation.buffer_size", "10000000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
+  // Test purge deleted cells
+  rc = tiledb_config_set(
+      config, "sm.consolidation.purge_deleted_cells", "1", &error);
+  REQUIRE(rc == TILEDB_ERR);
+  REQUIRE(error != nullptr);
+  tiledb_error_free(&error);
+  rc = tiledb_config_set(
+      config, "sm.consolidation.purge_deleted_cells", "true", &error);
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
@@ -4295,7 +4827,7 @@ TEST_CASE_METHOD(
 
   // Check that there are 4 fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 4);
 
@@ -4335,6 +4867,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -4348,7 +4885,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 3);
 
@@ -4388,6 +4925,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -4401,7 +4943,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 2);
 
@@ -4441,6 +4983,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -4454,7 +5001,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 4);
 
@@ -4494,6 +5041,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -4507,7 +5059,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 3);
 
@@ -4547,6 +5099,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -4560,7 +5117,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 2);
 
@@ -4600,6 +5157,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -4613,7 +5175,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 1);
 
@@ -4653,6 +5215,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -4666,7 +5233,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 2);
 
@@ -4706,6 +5273,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -4719,7 +5291,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 1);
 
@@ -4762,6 +5334,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -4775,7 +5352,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 3);
 
@@ -4823,6 +5400,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -4836,7 +5418,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 3);
 
@@ -4891,7 +5473,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 2);
 
@@ -4929,6 +5511,10 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(err == nullptr);
 
+  rc = tiledb_config_set(cfg, "sm.consolidation.buffer_size", "10000", &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+
   // Consolidate
   std::string encryption_type_string =
       encryption_type_str((tiledb::sm::EncryptionType)encryption_type_);
@@ -4953,7 +5539,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 2);
 
@@ -4993,6 +5579,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -5006,7 +5597,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 4);
 
@@ -5045,6 +5636,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -5061,7 +5657,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 2);
 
@@ -5104,6 +5700,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -5117,7 +5718,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 1);
 
@@ -5156,6 +5757,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -5169,7 +5775,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 2);
 
@@ -5207,7 +5813,12 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
   rc = tiledb_config_set(
-      config, "sm.consolidation.step_size_ratio", "0.78", &error);
+      config, "sm.consolidation.step_size_ratio", "0.85", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(error == nullptr);
 
@@ -5224,7 +5835,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 3);
 
@@ -5282,6 +5893,11 @@ TEST_CASE_METHOD(
     REQUIRE(error == nullptr);
   }
 
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
   rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, config);
   CHECK(rc == TILEDB_OK);
@@ -5292,7 +5908,7 @@ TEST_CASE_METHOD(
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
 
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == ((should_consolidate) ? 3 : 2));
 
@@ -5305,7 +5921,7 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   data.num = 0;
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == ((should_consolidate) ? 1 : 2));
 
@@ -5321,19 +5937,32 @@ TEST_CASE_METHOD(
   create_dense_vector();
   write_dense_vector_4_fragments();
 
+  tiledb_config_t* cfg;
+  tiledb_error_t* err = nullptr;
+
+  int rc = tiledb_config_alloc(&cfg, &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+
+  rc = tiledb_config_set(cfg, "sm.consolidation.buffer_size", "10000", &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+
   // Consolidate
-  int rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, NULL);
+  rc = tiledb_array_consolidate(ctx_, DENSE_VECTOR_NAME, cfg);
   CHECK(rc == TILEDB_OK);
+  tiledb_config_free(&cfg);
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 5);
 
   // Check number of consolidated metadata files
   data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_meta_num, &data);
+  rc = tiledb_vfs_ls(
+      ctx_, vfs_, DENSE_VECTOR_FRAG_META_DIR, &get_meta_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 0);
 
@@ -5419,13 +6048,14 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 4);
 
   // Check number of consolidated metadata files
   data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_meta_num, &data);
+  rc = tiledb_vfs_ls(
+      ctx_, vfs_, DENSE_VECTOR_FRAG_META_DIR, &get_meta_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 1);
 
@@ -5439,7 +6069,7 @@ TEST_CASE_METHOD(
 
   // Check
   data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 8);
 
@@ -5458,7 +6088,8 @@ TEST_CASE_METHOD(
 
   // Check number of consolidated metadata files
   data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_meta_num, &data);
+  rc = tiledb_vfs_ls(
+      ctx_, vfs_, DENSE_VECTOR_FRAG_META_DIR, &get_meta_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 2);
 
@@ -5469,7 +6100,7 @@ TEST_CASE_METHOD(
 
   // Check
   data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 8);
   read_dense_vector(1);
@@ -5497,7 +6128,8 @@ TEST_CASE_METHOD(
 
   // Check number of consolidated metadata files
   data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_VECTOR_NAME, &get_meta_num, &data);
+  rc = tiledb_vfs_ls(
+      ctx_, vfs_, DENSE_VECTOR_FRAG_META_DIR, &get_meta_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 1);
 
@@ -5526,11 +6158,17 @@ TEST_CASE_METHOD(
     ConsolidationFx,
     "C API: Test consolidation, sparse heterogeneous",
     "[capi][consolidation][sparse][heter]") {
+#ifdef TILEDB_SERIALIZATION
+  bool serialized_writes = GENERATE(true, false);
+#else
+  bool serialized_writes = false;
+#endif
+
   remove_sparse_heterogeneous_array();
   create_sparse_heterogeneous_array();
 
   SECTION("- write full, unordered") {
-    write_sparse_heterogeneous_full();
+    write_sparse_heterogeneous_full(serialized_writes);
     write_sparse_heterogeneous_unordered();
     consolidate_sparse_heterogeneous();
     read_sparse_heterogeneous_full_unordered();
@@ -5538,7 +6176,7 @@ TEST_CASE_METHOD(
 
   SECTION("- write unordered, full") {
     write_sparse_heterogeneous_unordered();
-    write_sparse_heterogeneous_full();
+    write_sparse_heterogeneous_full(serialized_writes);
     consolidate_sparse_heterogeneous();
     read_sparse_heterogeneous_unordered_full();
   }
@@ -5549,7 +6187,7 @@ TEST_CASE_METHOD(
     encryption_key_ = "0123456789abcdeF0123456789abcdeF";
     create_sparse_heterogeneous_array();
     write_sparse_heterogeneous_unordered();
-    write_sparse_heterogeneous_full();
+    write_sparse_heterogeneous_full(serialized_writes);
     consolidate_sparse_heterogeneous();
     read_sparse_heterogeneous_unordered_full();
   }
@@ -5561,11 +6199,17 @@ TEST_CASE_METHOD(
     ConsolidationFx,
     "C API: Test consolidation, sparse string",
     "[capi][consolidation][sparse][string]") {
+#ifdef TILEDB_SERIALIZATION
+  bool serialized_writes = GENERATE(true, false);
+#else
+  bool serialized_writes = false;
+#endif
+
   remove_sparse_string_array();
   create_sparse_string_array();
 
   SECTION("- write full, unordered") {
-    write_sparse_string_full();
+    write_sparse_string_full(serialized_writes);
     write_sparse_string_unordered();
     consolidate_sparse_string();
     read_sparse_string_full_unordered();
@@ -5573,7 +6217,7 @@ TEST_CASE_METHOD(
 
   SECTION("- write unordered, full") {
     write_sparse_string_unordered();
-    write_sparse_string_full();
+    write_sparse_string_full(serialized_writes);
     consolidate_sparse_string();
     read_sparse_string_unordered_full();
   }
@@ -5584,7 +6228,7 @@ TEST_CASE_METHOD(
     encryption_key_ = "0123456789abcdeF0123456789abcdeF";
     create_sparse_string_array();
     write_sparse_string_unordered();
-    write_sparse_string_full();
+    write_sparse_string_full(serialized_writes);
     consolidate_sparse_string();
     read_sparse_string_unordered_full();
   }
@@ -5596,9 +6240,15 @@ TEST_CASE_METHOD(
     ConsolidationFx,
     "C API: Test consolidating fragment metadata, sparse string",
     "[capi][consolidation][fragment-meta][sparse][string]") {
+#ifdef TILEDB_SERIALIZATION
+  bool serialized_writes = GENERATE(true, false);
+#else
+  bool serialized_writes = false;
+#endif
+
   remove_sparse_string_array();
   create_sparse_string_array();
-  write_sparse_string_full();
+  write_sparse_string_full(serialized_writes);
   write_sparse_string_unordered();
 
   // Validate read
@@ -5620,14 +6270,15 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, SPARSE_STRING_ARRAY_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(
+      ctx_, vfs_, SPARSE_STRING_ARRAY_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 2);
 
   // Check number of consolidated metadata files
   data = {ctx_, vfs_, 0};
-  rc =
-      tiledb_vfs_ls(ctx_, vfs_, SPARSE_STRING_ARRAY_NAME, &get_meta_num, &data);
+  rc = tiledb_vfs_ls(
+      ctx_, vfs_, SPARSE_STRING_ARRAY_FRAG_META_DIR, &get_meta_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 1);
 
@@ -5643,8 +6294,8 @@ TEST_CASE_METHOD(
 
   // Check number of consolidated metadata files
   data = {ctx_, vfs_, 0};
-  rc =
-      tiledb_vfs_ls(ctx_, vfs_, SPARSE_STRING_ARRAY_NAME, &get_meta_num, &data);
+  rc = tiledb_vfs_ls(
+      ctx_, vfs_, SPARSE_STRING_ARRAY_FRAG_META_DIR, &get_meta_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 1);
 
@@ -5660,9 +6311,15 @@ TEST_CASE_METHOD(
     "C API: Test consolidating fragment metadata, sparse string, pass only "
     "context",
     "[capi][consolidation][fragment-meta][sparse][string]") {
+#ifdef TILEDB_SERIALIZATION
+  bool serialized_writes = GENERATE(true, false);
+#else
+  bool serialized_writes = false;
+#endif
+
   remove_sparse_string_array();
   create_sparse_string_array();
-  write_sparse_string_full();
+  write_sparse_string_full(serialized_writes);
   write_sparse_string_unordered();
 
   // Validate read
@@ -5687,13 +6344,15 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct data = {ctx, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx, vfs_, SPARSE_STRING_ARRAY_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(
+      ctx, vfs_, SPARSE_STRING_ARRAY_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 2);
 
   // Check number of consolidated metadata files
   data = {ctx, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx, vfs_, SPARSE_STRING_ARRAY_NAME, &get_meta_num, &data);
+  rc = tiledb_vfs_ls(
+      ctx, vfs_, SPARSE_STRING_ARRAY_FRAG_META_DIR, &get_meta_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 1);
 
@@ -5714,7 +6373,8 @@ TEST_CASE_METHOD(
 
   // Check number of consolidated metadata files
   data = {ctx, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx, vfs_, SPARSE_STRING_ARRAY_NAME, &get_meta_num, &data);
+  rc = tiledb_vfs_ls(
+      ctx, vfs_, SPARSE_STRING_ARRAY_FRAG_META_DIR, &get_meta_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 1);
 
@@ -5730,14 +6390,20 @@ TEST_CASE_METHOD(
     ConsolidationFx,
     "C API: Test consolidation and timestamps",
     "[capi][consolidation][timestamps]") {
+#ifdef TILEDB_SERIALIZATION
+  bool serialized_writes = GENERATE(true, false);
+#else
+  bool serialized_writes = false;
+#endif
+
   remove_dense_array();
   create_dense_array();
 
   SECTION("- consolidate fragments with timestamps") {
-    write_dense_subarray();
+    write_dense_subarray(serialized_writes);
     auto start = tiledb::sm::utils::time::timestamp_now_ms();
-    write_dense_subarray(1, 2, 1, 2);
-    write_dense_subarray(1, 2, 1, 2);
+    write_dense_subarray(serialized_writes, 1, 2, 1, 2);
+    write_dense_subarray(serialized_writes, 1, 2, 1, 2);
     auto end = tiledb::sm::utils::time::timestamp_now_ms();
     consolidate_dense("fragments", start, end);
 
@@ -5745,10 +6411,10 @@ TEST_CASE_METHOD(
   }
 
   SECTION("- consolidate fragments with timestamps, overlapping start") {
-    write_dense_subarray();
+    write_dense_subarray(serialized_writes);
     auto start = tiledb::sm::utils::time::timestamp_now_ms();
-    write_dense_subarray();
-    write_dense_subarray();
+    write_dense_subarray(serialized_writes);
+    write_dense_subarray(serialized_writes);
     auto end = tiledb::sm::utils::time::timestamp_now_ms();
     consolidate_dense("fragments", start, end);
 
@@ -5802,30 +6468,33 @@ TEST_CASE_METHOD(
     ConsolidationFx,
     "C API: Test vacuuming and timestamps",
     "[capi][vacuuming][timestamps]") {
+#ifdef TILEDB_SERIALIZATION
+  bool serialized_writes = GENERATE(true, false);
+#else
+  bool serialized_writes = false;
+#endif
+
   remove_dense_array();
   create_dense_array();
 
   SECTION("- vacuum fragments with timestamps") {
-    write_dense_subarray();
+    write_dense_subarray(serialized_writes);
 
     auto start1 = tiledb::sm::utils::time::timestamp_now_ms();
-    write_dense_subarray(1, 2, 3, 4);
-    write_dense_subarray(1, 2, 3, 4);
+    write_dense_subarray(serialized_writes, 1, 2, 3, 4);
+    write_dense_subarray(serialized_writes, 1, 2, 3, 4);
     auto end1 = tiledb::sm::utils::time::timestamp_now_ms();
     consolidate_dense("fragments", start1, end1);
 
     auto start2 = tiledb::sm::utils::time::timestamp_now_ms();
-    write_dense_subarray(1, 2, 1, 2);
-    write_dense_subarray(1, 2, 1, 2);
+    write_dense_subarray(serialized_writes, 1, 2, 1, 2);
+    write_dense_subarray(serialized_writes, 1, 2, 1, 2);
     auto end2 = tiledb::sm::utils::time::timestamp_now_ms();
 
     consolidate_dense("fragments", start2, end2);
     CHECK(get_num_fragments_to_vacuum_dense() == 4);
 
-    vacuum_dense("fragments", start1, end1);
-    CHECK(get_num_fragments_to_vacuum_dense() == 2);
-
-    vacuum_dense("fragments", start2, end2);
+    vacuum_dense("fragments");
     CHECK(get_num_fragments_to_vacuum_dense() == 0);
   }
 
@@ -5853,14 +6522,7 @@ TEST_CASE_METHOD(
     get_array_meta_files_dense(array_meta_files);
     CHECK(array_meta_files.size() == 7);
 
-    vacuum_dense("array_meta", start1, end1);
-
-    get_array_meta_vac_files_dense(array_meta_vac_files);
-    CHECK(array_meta_vac_files.size() == 1);
-    get_array_meta_files_dense(array_meta_files);
-    CHECK(array_meta_files.size() == 5);
-
-    vacuum_dense("array_meta", start2, end2);
+    vacuum_dense("array_meta");
 
     get_array_meta_vac_files_dense(array_meta_vac_files);
     CHECK(array_meta_vac_files.size() == 0);
@@ -5874,62 +6536,533 @@ TEST_CASE_METHOD(
 
 TEST_CASE_METHOD(
     ConsolidationFx,
-    "C API: Test partial vacuuming and timestamps",
-    "[capi][partial][vacuuming][timestamps]") {
+    "C API: Test consolidation, dense, commits",
+    "[capi][consolidation][dense][commits]") {
+#ifdef TILEDB_SERIALIZATION
+  bool serialized_writes = GENERATE(true, false);
+#else
+  bool serialized_writes = false;
+#endif
+
   remove_dense_array();
   create_dense_array();
 
-  write_dense_subarray();
-  std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  write_dense_subarray(1, 2, 3, 4);
-  std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  write_dense_subarray(1, 2, 1, 2);
-  std::this_thread::sleep_for(std::chrono::milliseconds(1));
-  write_dense_subarray(1, 2, 1, 2);
+  SECTION("- write full, subarray") {
+    // Consolidation works.
+    write_dense_full(serialized_writes);
+    write_dense_subarray(serialized_writes);
+    consolidate_dense("commits");
+    read_dense_full_subarray();
+    check_commits_dir_dense(1, 2, 0);
 
-  std::vector<uint64_t> fragment_timestamps;
-  auto rc = tiledb_vfs_ls(
-      ctx_,
-      vfs_,
-      DENSE_ARRAY_NAME,
-      &get_fragment_timestamps,
-      &fragment_timestamps);
+    // Vacuum works.
+    vacuum_dense("commits");
+    read_dense_full_subarray();
+    check_commits_dir_dense(1, 0, 0);
+
+    // Second consolidation works.
+    consolidate_dense("commits");
+    read_dense_full_subarray();
+    check_commits_dir_dense(2, 0, 0);
+
+    // Second vacuum works.
+    vacuum_dense("commits");
+    read_dense_full_subarray();
+    check_commits_dir_dense(1, 0, 0);
+
+    // After fragment consolidation and vacuuming, array is still valid.
+    consolidate_dense();
+    vacuum_dense();
+    read_dense_full_subarray();
+    check_commits_dir_dense(1, 1, 1);
+
+    // Consolidation to get rid of ignore file.
+    consolidate_dense("commits");
+    read_dense_full_subarray();
+    check_commits_dir_dense(2, 1, 1);
+
+    // Second vacuum works.
+    vacuum_dense("commits");
+    read_dense_full_subarray();
+    check_commits_dir_dense(1, 0, 0);
+  }
+
+  SECTION("- write subarray, full") {
+    // Consolidation works.
+    write_dense_subarray(serialized_writes);
+    write_dense_full(serialized_writes);
+    consolidate_dense("commits");
+    read_dense_subarray_full();
+
+    // Vacuum works.
+    vacuum_dense("commits");
+    read_dense_subarray_full();
+    check_commits_dir_dense(1, 0, 0);
+
+    // Second consolidation works.
+    consolidate_dense("commits");
+    read_dense_subarray_full();
+    check_commits_dir_dense(2, 0, 0);
+
+    // Second vacuum works.
+    vacuum_dense("commits");
+    read_dense_subarray_full();
+    check_commits_dir_dense(1, 0, 0);
+
+    // After fragment consolidation and vacuuming, array is still valid.
+    consolidate_dense();
+    vacuum_dense();
+    read_dense_subarray_full();
+    check_commits_dir_dense(1, 1, 1);
+
+    // Consolidation to get rid of ignore file.
+    consolidate_dense("commits");
+    read_dense_subarray_full();
+    check_commits_dir_dense(2, 1, 1);
+
+    // Second vacuum works.
+    vacuum_dense("commits");
+    read_dense_subarray_full();
+    check_commits_dir_dense(1, 0, 0);
+  }
+
+  SECTION("- write (encrypted) subarray, full") {
+    remove_dense_array();
+    encryption_type_ = TILEDB_AES_256_GCM;
+    encryption_key_ = "0123456789abcdeF0123456789abcdeF";
+    create_dense_array();
+
+    // Consolidation works.
+    write_dense_subarray(serialized_writes);
+    write_dense_full(serialized_writes);
+    consolidate_dense("commits");
+    read_dense_subarray_full();
+
+    // Vacuum works.
+    vacuum_dense("commits");
+    read_dense_subarray_full();
+    check_commits_dir_dense(1, 0, 0);
+
+    // Second consolidation works.
+    consolidate_dense("commits");
+    read_dense_subarray_full();
+    check_commits_dir_dense(2, 0, 0);
+
+    // Second vacuum works.
+    vacuum_dense("commits");
+    read_dense_subarray_full();
+    check_commits_dir_dense(1, 0, 0);
+
+    // After fragment consolidation and vacuuming, array is still valid.
+    consolidate_dense();
+    vacuum_dense();
+    read_dense_subarray_full();
+    check_commits_dir_dense(1, 1, 1);
+
+    // Consolidation to get rid of ignore file.
+    consolidate_dense("commits");
+    read_dense_subarray_full();
+    check_commits_dir_dense(2, 1, 1);
+
+    // Second vacuum works.
+    vacuum_dense("commits");
+    read_dense_subarray_full();
+    check_commits_dir_dense(1, 0, 0);
+  }
+
+  remove_dense_array();
+}
+
+TEST_CASE_METHOD(
+    ConsolidationFx,
+    "C API: Test consolidation, sparse, commits",
+    "[capi][consolidation][sparse][commits]") {
+#ifdef TILEDB_SERIALIZATION
+  bool serialized_writes = GENERATE(true, false);
+#else
+  bool serialized_writes = false;
+#endif
+
+  remove_sparse_array();
+  create_sparse_array();
+
+  SECTION("- write full, unordered") {
+    // Consolidation works.
+    write_sparse_full(serialized_writes);
+    write_sparse_unordered();
+    consolidate_sparse("commits");
+    read_sparse_full_unordered();
+    check_commits_dir_sparse(1, 2, 0);
+
+    // Vacuum works.
+    vacuum_sparse("commits");
+    read_sparse_full_unordered();
+    check_commits_dir_sparse(1, 0, 0);
+
+    // Second consolidation works.
+    consolidate_sparse("commits");
+    read_sparse_full_unordered();
+    check_commits_dir_sparse(2, 0, 0);
+
+    // Second vacuum works.
+    vacuum_sparse("commits");
+    read_sparse_full_unordered();
+    check_commits_dir_sparse(1, 0, 0);
+
+    // After fragment consolidation and vacuuming, array is still valid.
+    consolidate_sparse();
+    vacuum_sparse();
+    read_sparse_full_unordered();
+    check_commits_dir_sparse(1, 1, 1);
+
+    // Consolidation to get rid of ignore file.
+    consolidate_sparse("commits");
+    read_sparse_full_unordered();
+    check_commits_dir_sparse(2, 1, 1);
+
+    // Second vacuum works.
+    vacuum_sparse("commits");
+    read_sparse_full_unordered();
+    check_commits_dir_sparse(1, 0, 0);
+  }
+
+  SECTION("- write unordered, full") {
+    // Consolidation works.
+    write_sparse_unordered();
+    write_sparse_full(serialized_writes);
+    consolidate_sparse("commits");
+    read_sparse_unordered_full();
+    check_commits_dir_sparse(1, 2, 0);
+
+    // Vacuum works.
+    vacuum_sparse("commits");
+    read_sparse_unordered_full();
+    check_commits_dir_sparse(1, 0, 0);
+
+    // Second consolidation works.
+    consolidate_sparse("commits");
+    read_sparse_unordered_full();
+    check_commits_dir_sparse(2, 0, 0);
+
+    // Second vacuum works.
+    vacuum_sparse("commits");
+    read_sparse_unordered_full();
+    check_commits_dir_sparse(1, 0, 0);
+
+    // After fragment consolidation and vacuuming, array is still valid.
+    consolidate_sparse();
+    vacuum_sparse();
+    read_sparse_unordered_full();
+    check_commits_dir_sparse(1, 1, 1);
+
+    // Consolidation to get rid of ignore file.
+    consolidate_sparse("commits");
+    read_sparse_unordered_full();
+    check_commits_dir_sparse(2, 1, 1);
+
+    // Second vacuum works.
+    vacuum_sparse("commits");
+    read_sparse_unordered_full();
+    check_commits_dir_sparse(1, 0, 0);
+  }
+
+  SECTION("- write (encrypted) unordered, full") {
+    remove_sparse_array();
+    encryption_type_ = TILEDB_AES_256_GCM;
+    encryption_key_ = "0123456789abcdeF0123456789abcdeF";
+    create_sparse_array();
+
+    // Consolidation works.
+    write_sparse_unordered();
+    write_sparse_full(serialized_writes);
+    consolidate_sparse("commits");
+    read_sparse_unordered_full();
+    check_commits_dir_sparse(1, 2, 0);
+
+    // Vacuum works.
+    vacuum_sparse("commits");
+    read_sparse_unordered_full();
+    check_commits_dir_sparse(1, 0, 0);
+
+    // Second consolidation works.
+    consolidate_sparse("commits");
+    read_sparse_unordered_full();
+    check_commits_dir_sparse(2, 0, 0);
+
+    // Second vacuum works.
+    vacuum_sparse("commits");
+    read_sparse_unordered_full();
+    check_commits_dir_sparse(1, 0, 0);
+
+    // After fragment consolidation and vacuuming, array is still valid.
+    consolidate_sparse();
+    vacuum_sparse();
+    read_sparse_unordered_full();
+    check_commits_dir_sparse(1, 1, 1);
+
+    // Consolidation to get rid of ignore file.
+    consolidate_sparse("commits");
+    read_sparse_unordered_full();
+    check_commits_dir_sparse(2, 1, 1);
+
+    // Second vacuum works.
+    vacuum_sparse("commits");
+    read_sparse_unordered_full();
+    check_commits_dir_sparse(1, 0, 0);
+  }
+
+  remove_sparse_array();
+}
+
+// TODO: remove once tiledb_vfs_copy_dir is implemented for windows.
+#ifndef _WIN32
+TEST_CASE_METHOD(
+    ConsolidationFx,
+    "C API: Test consolidation, sparse, commits, mixed versions",
+    "[capi][consolidation][commits][mixed-versions]") {
+  if constexpr (is_experimental_build) {
+    return;
+  }
+
+#ifdef TILEDB_SERIALIZATION
+  bool serialized_writes = GENERATE(true, false);
+#else
+  bool serialized_writes = false;
+#endif
+
+  remove_sparse_array();
+
+  // Get the v11 sparse array.
+  std::string v11_arrays_dir =
+      std::string(TILEDB_TEST_INPUTS_DIR) + "/arrays/sparse_array_v11";
+  REQUIRE(
+      tiledb_vfs_copy_dir(
+          ctx_, vfs_, v11_arrays_dir.c_str(), SPARSE_ARRAY_NAME) == TILEDB_OK);
+
+  // Write v11 fragment.
+  write_sparse_full(serialized_writes);
+
+  // Upgrade to latest version.
+  REQUIRE(
+      tiledb_array_upgrade_version(ctx_, SPARSE_ARRAY_NAME, nullptr) ==
+      TILEDB_OK);
+
+  // Consolidation works.
+  write_sparse_unordered();
+  consolidate_sparse("commits");
+  read_sparse_full_unordered();
+  check_commits_dir_sparse(1, 1, 0);
+  check_ok_num(1);
+
+  // Vacuum works.
+  vacuum_sparse("commits");
+  read_sparse_full_unordered();
+  check_commits_dir_sparse(1, 0, 0);
+  check_ok_num(0);
+
+  // Second consolidation works.
+  consolidate_sparse("commits");
+  read_sparse_full_unordered();
+  check_commits_dir_sparse(2, 0, 0);
+
+  // Second vacuum works.
+  vacuum_sparse("commits");
+  read_sparse_full_unordered();
+  check_commits_dir_sparse(1, 0, 0);
+
+  // After fragment consolidation and vacuuming, array is still valid.
+  consolidate_sparse();
+  vacuum_sparse();
+  read_sparse_full_unordered();
+  check_commits_dir_sparse(1, 1, 1);
+
+  // Consolidation to get rid of ignore file.
+  consolidate_sparse("commits");
+  read_sparse_full_unordered();
+  check_commits_dir_sparse(2, 1, 1);
+
+  // Second vacuum works.
+  vacuum_sparse("commits");
+  read_sparse_full_unordered();
+  check_commits_dir_sparse(1, 0, 0);
+
+  remove_sparse_array();
+}
+#endif
+
+TEST_CASE_METHOD(
+    ConsolidationFx,
+    "C API: Test consolidation, dense split fragments",
+    "[capi][consolidation][dense][split-fragments]") {
+#ifdef TILEDB_SERIALIZATION
+  bool serialized_writes = GENERATE(true, false);
+#else
+  bool serialized_writes = false;
+#endif
+
+  remove_dense_array();
+  create_dense_array();
+  write_dense_subarray(serialized_writes, 1, 2, 1, 2);
+  write_dense_subarray(serialized_writes, 1, 2, 3, 4);
+  write_dense_subarray(serialized_writes, 3, 4, 1, 2);
+  write_dense_subarray(serialized_writes, 3, 4, 3, 4);
+
+  // Create fragment info object
+  tiledb_fragment_info_t* fragment_info = nullptr;
+  int rc = tiledb_fragment_info_alloc(ctx_, DENSE_ARRAY_NAME, &fragment_info);
   CHECK(rc == TILEDB_OK);
 
-  consolidate_dense(
-      "fragments", fragment_timestamps[1], fragment_timestamps[3]);
+  // Load fragment info
+  rc = tiledb_fragment_info_load(ctx_, fragment_info);
+  CHECK(rc == TILEDB_OK);
 
-  std::vector<std::string> vac_files;
-  get_vac_files_dense(vac_files);
-  CHECK(vac_files.size() == 1);
+  // Get fragment URIs
+  const char* uri1;
+  rc = tiledb_fragment_info_get_fragment_uri(ctx_, fragment_info, 1, &uri1);
+  CHECK(rc == TILEDB_OK);
+  const char* uri2;
+  rc = tiledb_fragment_info_get_fragment_uri(ctx_, fragment_info, 3, &uri2);
+  CHECK(rc == TILEDB_OK);
 
-  vacuum_dense("fragments", fragment_timestamps[0], fragment_timestamps[0]);
+  // Set consolidation buffer size
+  tiledb_config_t* cfg;
+  tiledb_error_t* err = nullptr;
 
+  rc = tiledb_config_alloc(&cfg, &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+
+  rc = tiledb_config_set(cfg, "sm.consolidation.buffer_size", "10000", &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+
+  // Consolidate
+  const char* uris[2] = {strrchr(uri1, '/') + 1, strrchr(uri2, '/') + 1};
+  rc = tiledb_array_consolidate_fragments(ctx_, DENSE_ARRAY_NAME, uris, 2, cfg);
+  CHECK(rc == TILEDB_OK);
+  tiledb_config_free(&cfg);
+
+  tiledb_fragment_info_free(&fragment_info);
+
+  // Check number of fragments
   get_num_struct data = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_ARRAY_NAME, &get_dir_num, &data);
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_ARRAY_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
   CHECK(data.num == 5);
 
-  vacuum_dense("fragments", fragment_timestamps[1], fragment_timestamps[1]);
+  // Check reading after consolidation
+  read_dense_four_tiles();
 
-  data.num = 0;
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_ARRAY_NAME, &get_dir_num, &data);
+  // Vacuum
+  rc = tiledb_array_vacuum(ctx_, DENSE_ARRAY_NAME, NULL);
   CHECK(rc == TILEDB_OK);
-  CHECK(data.num == 4);
+  read_dense_four_tiles();
 
-  get_vac_files_dense(vac_files);
-  CHECK(vac_files.size() == 1);
-
-  vacuum_dense("fragments", fragment_timestamps[2], fragment_timestamps[3]);
-
-  data.num = 0;
-  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_ARRAY_NAME, &get_dir_num, &data);
+  // Check number of fragments
+  data = {ctx_, vfs_, 0};
+  rc = tiledb_vfs_ls(ctx_, vfs_, DENSE_ARRAY_FRAG_DIR, &get_dir_num, &data);
   CHECK(rc == TILEDB_OK);
-  CHECK(data.num == 2);
-
-  get_vac_files_dense(vac_files);
-  CHECK(vac_files.size() == 0);
+  CHECK(data.num == 3);
 
   // Clean up
   remove_dense_array();
+}
+
+TEST_CASE_METHOD(
+    ConsolidationFx,
+    "C API: Test consolidation, sparse split fragments",
+    "[capi][consolidation][sparse][split-fragments]") {
+  remove_sparse_array();
+  create_sparse_array();
+  write_sparse_row(0);
+  write_sparse_row(1);
+  write_sparse_row(2);
+  write_sparse_row(3);
+
+  // Create fragment info object
+  tiledb_fragment_info_t* fragment_info = nullptr;
+  int rc = tiledb_fragment_info_alloc(ctx_, SPARSE_ARRAY_NAME, &fragment_info);
+  CHECK(rc == TILEDB_OK);
+
+  // Load fragment info
+  rc = tiledb_fragment_info_load(ctx_, fragment_info);
+  CHECK(rc == TILEDB_OK);
+
+  // Get fragment URIs
+  const char* uri1;
+  rc = tiledb_fragment_info_get_fragment_uri(ctx_, fragment_info, 1, &uri1);
+  CHECK(rc == TILEDB_OK);
+  const char* uri2;
+  rc = tiledb_fragment_info_get_fragment_uri(ctx_, fragment_info, 3, &uri2);
+  CHECK(rc == TILEDB_OK);
+
+  // Set consolidation buffer size
+  tiledb_config_t* cfg;
+  tiledb_error_t* err = nullptr;
+
+  rc = tiledb_config_alloc(&cfg, &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+
+  rc = tiledb_config_set(cfg, "sm.consolidation.buffer_size", "10000", &err);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(err == nullptr);
+
+  // Consolidate
+  const char* uris[2] = {strrchr(uri1, '/') + 1, strrchr(uri2, '/') + 1};
+  rc =
+      tiledb_array_consolidate_fragments(ctx_, SPARSE_ARRAY_NAME, uris, 2, cfg);
+  CHECK(rc == TILEDB_OK);
+  tiledb_config_free(&cfg);
+
+  tiledb_fragment_info_free(&fragment_info);
+
+  // Check number of fragments
+  get_num_struct data = {ctx_, vfs_, 0};
+  rc = tiledb_vfs_ls(ctx_, vfs_, SPARSE_ARRAY_FRAG_DIR, &get_dir_num, &data);
+  CHECK(rc == TILEDB_OK);
+  CHECK(data.num == 5);
+
+  // Check reading after consolidation
+  read_sparse_rows();
+
+  // Vacuum
+  rc = tiledb_array_vacuum(ctx_, SPARSE_ARRAY_NAME, NULL);
+  CHECK(rc == TILEDB_OK);
+  read_sparse_rows();
+
+  // Check number of fragments
+  data = {ctx_, vfs_, 0};
+  rc = tiledb_vfs_ls(ctx_, vfs_, SPARSE_ARRAY_FRAG_DIR, &get_dir_num, &data);
+  CHECK(rc == TILEDB_OK);
+  CHECK(data.num == 3);
+
+  // Clean up
+  remove_sparse_array();
+}
+
+TEST_CASE_METHOD(
+    ConsolidationFx,
+    "C API: Test consolidation, empty array",
+    "[capi][consolidation][empty]") {
+  auto sparse = GENERATE(true, false);
+  auto mode = GENERATE(
+      std::string("commits"),
+      std::string("fragment_meta"),
+      std::string("fragments"),
+      std::string("array_meta"));
+
+  if (sparse) {
+    remove_sparse_array();
+    create_sparse_array();
+    consolidate_sparse(mode);
+    vacuum_sparse(mode);
+    remove_sparse_array();
+  } else {
+    remove_dense_array();
+    create_dense_array();
+    consolidate_dense(mode);
+    vacuum_dense(mode);
+    remove_dense_array();
+  }
 }

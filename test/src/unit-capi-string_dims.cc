@@ -30,14 +30,15 @@
  * Tests of C API for sparse arrays with string dimensions.
  */
 
-#include "catch.hpp"
-#include "test/src/helpers.h"
-#include "test/src/vfs_helpers.h"
+#include <test/support/tdb_catch.h>
+#include "test/support/src/helpers.h"
+#include "test/support/src/vfs_helpers.h"
 #ifdef _WIN32
 #include "tiledb/sm/filesystem/win.h"
 #else
 #include "tiledb/sm/filesystem/posix.h"
 #endif
+#include "tiledb/common/stdx_string.h"
 #include "tiledb/sm/c_api/tiledb.h"
 #include "tiledb/sm/c_api/tiledb_serialization.h"
 #include "tiledb/sm/enums/serialization_type.h"
@@ -84,7 +85,6 @@ struct StringDimsFx {
       const std::string& path, tiledb_array_schema_t* array_schema);
   int array_schema_load_wrapper(
       const std::string& path, tiledb_array_schema_t** array_schema);
-  void write_array_ascii(const std::string& array_name);
   void write_array_1d(
       tiledb_ctx_t* ctx,
       const std::string& array_name,
@@ -150,13 +150,25 @@ struct StringDimsFx {
       std::vector<uint64_t>* d_off,
       std::string* d_val,
       std::vector<int32_t>* a,
-      tiledb_query_status_t* status);
+      tiledb_query_status_t* status,
+      tiledb_query_status_details_t* details);
   void read_array_2d(
       tiledb_ctx_t* ctx,
       tiledb_array_t* array,
       tiledb_layout_t layout,
       const std::string& d1_start,
       const std::string& d1_end,
+      int32_t d2_start,
+      int32_t d2_end,
+      std::vector<uint64_t>* d1_off,
+      std::string* d1_val,
+      std::vector<int32_t>* d2,
+      std::vector<int32_t>* a,
+      tiledb_query_status_t* status);
+  void read_array_2d_default_string_range(
+      tiledb_ctx_t* ctx,
+      tiledb_array_t* array,
+      tiledb_layout_t layout,
       int32_t d2_start,
       int32_t d2_end,
       std::vector<uint64_t>* d1_off,
@@ -205,15 +217,7 @@ int StringDimsFx::get_dir_num(const char* path, void* data) {
   int is_dir;
   int rc = tiledb_vfs_is_dir(ctx, vfs, path, &is_dir);
   CHECK(rc == TILEDB_OK);
-  auto meta_dir =
-      std::string("/") + tiledb::sm::constants::array_metadata_folder_name;
-  auto schema_dir =
-      std::string("/") + tiledb::sm::constants::array_schema_folder_name;
-  if (!tiledb::sm::utils::parse::ends_with(path, meta_dir) &&
-      !tiledb::sm::utils::parse::ends_with(path, schema_dir)) {
-    // Ignoring the meta folder and the schema folder
-    data_struct->num += is_dir;
-  }
+  data_struct->num += is_dir;
 
   return 1;
 }
@@ -360,15 +364,7 @@ int StringDimsFx::tiledb_query_submit_wrapper(
   tiledb_buffer_list_t* buff_list1;
   int rc = tiledb_serialize_query(ctx, query, TILEDB_CAPNP, 1, &buff_list1);
 
-  // Global order writes are not (yet) supported for serialization. Just
-  // check that serialization is an error, and then execute the regular query.
-  if (layout == TILEDB_GLOBAL_ORDER && query_type == TILEDB_WRITE) {
-    REQUIRE(rc == TILEDB_ERR);
-    tiledb_buffer_list_free(&buff_list1);
-    return tiledb_query_submit(ctx, query);
-  } else {
-    REQUIRE(rc == TILEDB_OK);
-  }
+  REQUIRE(rc == TILEDB_OK);
 
   // Copy the data to a temporary memory region ("send over the network").
   tiledb_buffer_t* buff1;
@@ -608,49 +604,6 @@ int StringDimsFx::tiledb_query_submit_wrapper(
   return rc;
 }
 
-void StringDimsFx::write_array_ascii(const std::string& array_name) {
-  // Open array
-  tiledb_array_t* array;
-  int rc = tiledb_array_alloc(ctx_, array_name.c_str(), &array);
-  CHECK(rc == TILEDB_OK);
-  rc = tiledb_array_open(ctx_, array, TILEDB_WRITE);
-  CHECK(rc == TILEDB_OK);
-
-  // Create and submit query
-  tiledb_query_t* query;
-  rc = tiledb_query_alloc(ctx_, array, TILEDB_WRITE, &query);
-  REQUIRE(rc == TILEDB_OK);
-
-  char d_data[] = "aabbbcdddd";
-  uint64_t d_data_size = strlen(d_data);
-  uint64_t d_off[] = {0, 2, 5, 6};
-  uint64_t d_off_size = sizeof(d_off);
-  int32_t a_data[] = {1, 2, 3, 4};
-  uint64_t a_size = sizeof(a_data);
-  rc = tiledb_query_set_data_buffer(ctx_, query, "d", d_data, &d_data_size);
-  REQUIRE(rc == TILEDB_ERR);
-  rc = tiledb_query_set_data_buffer(ctx_, query, "d", d_data, &d_data_size);
-  REQUIRE(rc == TILEDB_OK);
-  rc = tiledb_query_set_offsets_buffer(ctx_, query, "d", d_off, &d_off_size);
-  REQUIRE(rc == TILEDB_OK);
-  rc = tiledb_query_set_data_buffer(ctx_, query, "a", a_data, &a_size);
-  REQUIRE(rc == TILEDB_OK);
-  rc = tiledb_query_set_layout(ctx_, query, TILEDB_GLOBAL_ORDER);
-  REQUIRE(rc == TILEDB_OK);
-  rc = tiledb_query_submit_wrapper(ctx_, query, array_name);
-  REQUIRE(rc == TILEDB_OK);
-  rc = tiledb_query_finalize(ctx_, query);
-  REQUIRE(rc == TILEDB_OK);
-
-  // Close array
-  rc = tiledb_array_close(ctx_, array);
-  CHECK(rc == TILEDB_OK);
-
-  // Clean up
-  tiledb_array_free(&array);
-  tiledb_query_free(&query);
-}
-
 void StringDimsFx::write_array_1d(
     tiledb_ctx_t* ctx,
     const std::string& array_name,
@@ -683,10 +636,14 @@ void StringDimsFx::write_array_1d(
   REQUIRE(rc == TILEDB_OK);
   rc = tiledb_query_set_layout(ctx, query, layout);
   REQUIRE(rc == TILEDB_OK);
-  rc = tiledb_query_submit_wrapper(ctx, query, array_name);
-  REQUIRE(rc == TILEDB_OK);
-  rc = tiledb_query_finalize(ctx, query);
-  REQUIRE(rc == TILEDB_OK);
+  if (layout != TILEDB_GLOBAL_ORDER || !serialize_) {
+    rc = tiledb_query_submit(ctx, query);
+    REQUIRE(rc == TILEDB_OK);
+    rc = tiledb_query_finalize(ctx, query);
+    REQUIRE(rc == TILEDB_OK);
+  } else {
+    submit_and_finalize_serialized_query(ctx, query);
+  }
 
   // Close array
   rc = tiledb_array_close(ctx, array);
@@ -734,10 +691,14 @@ void StringDimsFx::write_array_2d(
   REQUIRE(rc == TILEDB_OK);
   rc = tiledb_query_set_layout(ctx, query, layout);
   REQUIRE(rc == TILEDB_OK);
-  rc = tiledb_query_submit_wrapper(ctx, query, array_name);
-  REQUIRE(rc == TILEDB_OK);
-  rc = tiledb_query_finalize(ctx, query);
-  REQUIRE(rc == TILEDB_OK);
+  if (layout != TILEDB_GLOBAL_ORDER || !serialize_) {
+    rc = tiledb_query_submit(ctx, query);
+    REQUIRE(rc == TILEDB_OK);
+    rc = tiledb_query_finalize(ctx, query);
+    REQUIRE(rc == TILEDB_OK);
+  } else {
+    submit_and_finalize_serialized_query(ctx, query);
+  }
 
   // Close array
   rc = tiledb_array_close(ctx, array);
@@ -960,7 +921,8 @@ void StringDimsFx::read_array_1d(
     std::vector<uint64_t>* d_off,
     std::string* d_val,
     std::vector<int32_t>* a,
-    tiledb_query_status_t* status) {
+    tiledb_query_status_t* status,
+    tiledb_query_status_details_t* details) {
   // Create query
   tiledb_query_t* query;
   int rc = tiledb_query_alloc(ctx, array, TILEDB_READ, &query);
@@ -1024,6 +986,10 @@ void StringDimsFx::read_array_1d(
 
   // Get status
   rc = tiledb_query_get_status(ctx, query, status);
+  CHECK(rc == TILEDB_OK);
+
+  // Get details
+  rc = tiledb_query_get_status_details(ctx, query, details);
   CHECK(rc == TILEDB_OK);
 
   // Resize the result buffers
@@ -1146,6 +1112,66 @@ void StringDimsFx::read_array_2d(
   tiledb_query_free(&query);
 }
 
+void StringDimsFx::read_array_2d_default_string_range(
+    tiledb_ctx_t* ctx,
+    tiledb_array_t* array,
+    tiledb_layout_t layout,
+    int32_t d2_start,
+    int32_t d2_end,
+    std::vector<uint64_t>* d1_off,
+    std::string* d1_val,
+    std::vector<int32_t>* d2,
+    std::vector<int32_t>* a,
+    tiledb_query_status_t* status) {
+  // Create query
+  tiledb_query_t* query;
+  int rc = tiledb_query_alloc(ctx, array, TILEDB_READ, &query);
+  CHECK(rc == TILEDB_OK);
+
+  // Add range for int dimension
+  rc = tiledb_query_add_range(ctx, query, 1, &d2_start, &d2_end, nullptr);
+  CHECK(rc == TILEDB_OK);
+
+  // Set query buffers
+  uint64_t d1_off_size = d1_off->size() * sizeof(uint64_t);
+  uint64_t d1_val_size = d1_val->size();
+  uint64_t d2_size = d2->size() * sizeof(int32_t);
+  uint64_t a_size = a->size() * sizeof(int32_t);
+  rc = tiledb_query_set_data_buffer(
+      ctx, query, "d1", (void*)d1_val->data(), &d1_val_size);
+  REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_query_set_offsets_buffer(
+      ctx, query, "d1", (uint64_t*)d1_off->data(), &d1_off_size);
+  REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(ctx, query, "d2", d2->data(), &d2_size);
+  REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_query_set_data_buffer(ctx, query, "a", a->data(), &a_size);
+  REQUIRE(rc == TILEDB_OK);
+
+  // Set layout
+  rc = tiledb_query_set_layout(ctx, query, layout);
+  REQUIRE(rc == TILEDB_OK);
+
+  const char* array_uri;
+  rc = tiledb_array_get_uri(ctx, array, &array_uri);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_query_submit_wrapper(ctx, query, array_uri);
+  CHECK(rc == TILEDB_OK);
+
+  // Get status
+  rc = tiledb_query_get_status(ctx, query, status);
+  CHECK(rc == TILEDB_OK);
+
+  // Resize the result buffers
+  d1_off->resize(d1_off_size / sizeof(uint64_t));
+  d1_val->resize(d1_val_size / sizeof(char));
+  d2->resize(d2_size / sizeof(int32_t));
+  a->resize(a_size / sizeof(int32_t));
+
+  // Clean up
+  tiledb_query_free(&query);
+}
+
 TEST_CASE_METHOD(
     StringDimsFx,
     "C API: Test sparse array with string dimensions, array schema",
@@ -1154,7 +1180,9 @@ TEST_CASE_METHOD(
     serialize_ = false;
   }
   SECTION("- Serialization") {
+#ifdef TILEDB_SERIALIZATION
     serialize_ = true;
+#endif
   }
   SupportedFsLocal local_fs;
   std::string array_name =
@@ -1262,7 +1290,9 @@ TEST_CASE_METHOD(
     serialize_ = false;
   }
   SECTION("- Serialization") {
+#ifdef TILEDB_SERIALIZATION
     serialize_ = true;
+#endif
   }
   SupportedFsLocal local_fs;
   std::string array_name =
@@ -1335,7 +1365,9 @@ TEST_CASE_METHOD(
     serialize_ = false;
   }
   SECTION("- Serialization") {
+#ifdef TILEDB_SERIALIZATION
     serialize_ = true;
+#endif
   }
   SupportedFsLocal local_fs;
   std::string array_name =
@@ -1409,7 +1441,9 @@ TEST_CASE_METHOD(
     serialize_ = false;
   }
   SECTION("- Serialization") {
+#ifdef TILEDB_SERIALIZATION
     serialize_ = true;
+#endif
   }
   SupportedFsLocal local_fs;
   std::string array_name =
@@ -1482,7 +1516,9 @@ TEST_CASE_METHOD(
     serialize_ = false;
   }
   SECTION("- Serialization") {
+#ifdef TILEDB_SERIALIZATION
     serialize_ = true;
+#endif
   }
   SupportedFsLocal local_fs;
   std::string array_name =
@@ -1601,7 +1637,9 @@ TEST_CASE_METHOD(
     serialize_ = false;
   }
   SECTION("- Serialization") {
+#ifdef TILEDB_SERIALIZATION
     serialize_ = true;
+#endif
   }
   SupportedFsLocal local_fs;
   std::string array_name =
@@ -1737,8 +1775,18 @@ TEST_CASE_METHOD(
   r_d_val.resize(20);
   std::vector<int32_t> r_a(10);
   tiledb_query_status_t status;
+  tiledb_query_status_details_t details;
   read_array_1d(
-      ctx_, array, layout, "a", "ee", &r_d_off, &r_d_val, &r_a, &status);
+      ctx_,
+      array,
+      layout,
+      "a",
+      "ee",
+      &r_d_off,
+      &r_d_val,
+      &r_a,
+      &status,
+      &details);
   CHECK(status == TILEDB_COMPLETED);
   CHECK(r_d_val == "aabbccdddd");
   std::vector<uint64_t> c_d_off = {0, 2, 4, 6};
@@ -1751,7 +1799,16 @@ TEST_CASE_METHOD(
   r_d_val.resize(20);
   r_a.resize(10);
   read_array_1d(
-      ctx_, array, layout, "aab", "cc", &r_d_off, &r_d_val, &r_a, &status);
+      ctx_,
+      array,
+      layout,
+      "aab",
+      "cc",
+      &r_d_off,
+      &r_d_val,
+      &r_a,
+      &status,
+      &details);
   CHECK(status == TILEDB_COMPLETED);
   CHECK(r_d_val == "bbcc");
   c_d_off = {0, 2};
@@ -1764,24 +1821,44 @@ TEST_CASE_METHOD(
   r_d_val.resize(20);
   r_a.resize(10);
   read_array_1d(
-      ctx_, array, layout, "aa", "cc", &r_d_off, &r_d_val, &r_a, &status);
+      ctx_,
+      array,
+      layout,
+      "aa",
+      "cc",
+      &r_d_off,
+      &r_d_val,
+      &r_a,
+      &status,
+      &details);
   CHECK(status == TILEDB_INCOMPLETE);
   CHECK(r_d_val == "aabb");
   c_d_off = {0, 2};
   CHECK(r_d_off == c_d_off);
   c_a = {1, 2};
   CHECK(r_a == c_a);
+  CHECK(details.incomplete_reason == TILEDB_REASON_USER_BUFFER_SIZE);
 
   // Read [aa, cc] - INCOMPLETE, no result
   r_d_off.resize(1);
   r_d_val.resize(1);
   r_a.resize(10);
   read_array_1d(
-      ctx_, array, layout, "aa", "bb", &r_d_off, &r_d_val, &r_a, &status);
+      ctx_,
+      array,
+      layout,
+      "aa",
+      "bb",
+      &r_d_off,
+      &r_d_val,
+      &r_a,
+      &status,
+      &details);
   CHECK(status == TILEDB_INCOMPLETE);
   CHECK(r_d_val.size() == 0);
   CHECK(r_d_off.size() == 0);
   CHECK(r_a.size() == 0);
+  CHECK(details.incomplete_reason == TILEDB_REASON_USER_BUFFER_SIZE);
 
   // Close array
   rc = tiledb_array_close(ctx_, array);
@@ -1801,7 +1878,9 @@ TEST_CASE_METHOD(
     serialize_ = false;
   }
   SECTION("- Serialization") {
+#ifdef TILEDB_SERIALIZATION
     serialize_ = true;
+#endif
   }
   SupportedFsLocal local_fs;
   std::string array_name =
@@ -1881,8 +1960,18 @@ TEST_CASE_METHOD(
   r_d_val.resize(20);
   std::vector<int32_t> r_a(10);
   tiledb_query_status_t status;
+  tiledb_query_status_details_t details;
   read_array_1d(
-      ctx_, array, layout, "a", "ee", &r_d_off, &r_d_val, &r_a, &status);
+      ctx_,
+      array,
+      layout,
+      "a",
+      "ee",
+      &r_d_off,
+      &r_d_val,
+      &r_a,
+      &status,
+      &details);
   CHECK(status == TILEDB_COMPLETED);
   CHECK(r_d_val == "aaabbbccddddee");
   std::vector<uint64_t> c_d_off = {0, 1, 3, 4, 6, 8, 12};
@@ -1896,18 +1985,30 @@ TEST_CASE_METHOD(
 
   // Check number of fragments
   get_num_struct dirs = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, array_name.c_str(), &get_dir_num, &dirs);
+  auto frag_dir = get_fragment_dir(array_name);
+  rc = tiledb_vfs_ls(ctx_, vfs_, frag_dir.c_str(), &get_dir_num, &dirs);
   CHECK(rc == TILEDB_OK);
   CHECK(dirs.num == 2);
 
+  tiledb_config_t* config = nullptr;
+  tiledb_error_t* error = nullptr;
+  REQUIRE(tiledb_config_alloc(&config, &error) == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
+  rc = tiledb_config_set(
+      config, "sm.consolidation.buffer_size", "10000", &error);
+  REQUIRE(rc == TILEDB_OK);
+  REQUIRE(error == nullptr);
+
   // Consolidate
-  rc = tiledb_array_consolidate(ctx_, array_name.c_str(), nullptr);
+  rc = tiledb_array_consolidate(ctx_, array_name.c_str(), config);
   CHECK(rc == TILEDB_OK);
   rc = tiledb_array_vacuum(ctx_, array_name.c_str(), nullptr);
+  tiledb_config_free(&config);
 
   // Check number of fragments
   dirs = {ctx_, vfs_, 0};
-  rc = tiledb_vfs_ls(ctx_, vfs_, array_name.c_str(), &get_dir_num, &dirs);
+  rc = tiledb_vfs_ls(ctx_, vfs_, frag_dir.c_str(), &get_dir_num, &dirs);
   CHECK(rc == TILEDB_OK);
   CHECK(dirs.num == 1);
 
@@ -1933,7 +2034,16 @@ TEST_CASE_METHOD(
   r_d_val.resize(20);
   r_a.resize(10);
   read_array_1d(
-      ctx_, array, layout, "a", "ee", &r_d_off, &r_d_val, &r_a, &status);
+      ctx_,
+      array,
+      layout,
+      "a",
+      "ee",
+      &r_d_off,
+      &r_d_val,
+      &r_a,
+      &status,
+      &details);
   CHECK(status == TILEDB_COMPLETED);
   CHECK(r_d_val == "aaabbbccddddee");
   CHECK(r_d_off == c_d_off);
@@ -1957,7 +2067,9 @@ TEST_CASE_METHOD(
     serialize_ = false;
   }
   SECTION("- Serialization") {
+#ifdef TILEDB_SERIALIZATION
     serialize_ = true;
+#endif
   }
   SupportedFsLocal local_fs;
   std::string array_name =
@@ -2027,8 +2139,18 @@ TEST_CASE_METHOD(
   r_d_val.resize(20);
   std::vector<int32_t> r_a(10);
   tiledb_query_status_t status;
+  tiledb_query_status_details_t details;
   read_array_1d(
-      ctx_, array, layout, "a", "e", &r_d_off, &r_d_val, &r_a, &status);
+      ctx_,
+      array,
+      layout,
+      "a",
+      "e",
+      &r_d_off,
+      &r_d_val,
+      &r_a,
+      &status,
+      &details);
   CHECK(status == TILEDB_COMPLETED);
   CHECK(r_d_val == "aaccccdddd");
   std::vector<uint64_t> c_d_off = {0, 2, 4, 6};
@@ -2058,7 +2180,9 @@ TEST_CASE_METHOD(
     serialize_ = false;
   }
   SECTION("- Serialization") {
+#ifdef TILEDB_SERIALIZATION
     serialize_ = true;
+#endif
   }
   SupportedFsLocal local_fs;
   std::string array_name =
@@ -2145,8 +2269,18 @@ TEST_CASE_METHOD(
   r_d_val.resize(20);
   std::vector<int32_t> r_a(10);
   tiledb_query_status_t status;
+  tiledb_query_status_details_t details;
   read_array_1d(
-      ctx, array, layout, "a", "e", &r_d_off, &r_d_val, &r_a, &status);
+      ctx,
+      array,
+      layout,
+      "a",
+      "e",
+      &r_d_off,
+      &r_d_val,
+      &r_a,
+      &status,
+      &details);
   CHECK(status == TILEDB_COMPLETED);
   CHECK(r_d_val == "aaccdddd");
   std::vector<uint64_t> c_d_off = {0, 2, 4};
@@ -2176,7 +2310,9 @@ TEST_CASE_METHOD(
     serialize_ = false;
   }
   SECTION("- Serialization") {
+#ifdef TILEDB_SERIALIZATION
     serialize_ = true;
+#endif
   }
   SupportedFsLocal local_fs;
   std::string array_name =
@@ -2425,6 +2561,459 @@ TEST_CASE_METHOD(
 
   // Clean up
   tiledb_array_free(&array);
+  tiledb_config_free(&config);
+
+  remove_temp_dir(local_fs.file_prefix() + local_fs.temp_dir());
+}
+
+TEST_CASE_METHOD(
+    StringDimsFx,
+    "C API: Test multiple var size global writes 1",
+    "[capi][sparse][var-size][multiple-global-writes-1]") {
+  SECTION("- No serialization") {
+    serialize_ = false;
+  }
+  SECTION("- Serialization") {
+#ifdef TILEDB_SERIALIZATION
+    serialize_ = true;
+#endif
+  }
+  SupportedFsLocal local_fs;
+  std::string array_name =
+      local_fs.file_prefix() + local_fs.temp_dir() + "string_dims";
+  create_temp_dir(local_fs.file_prefix() + local_fs.temp_dir());
+
+  create_array(
+      ctx_,
+      array_name,
+      TILEDB_SPARSE,
+      {"d"},
+      {TILEDB_STRING_ASCII},
+      {nullptr},
+      {nullptr},
+      {"a"},
+      {TILEDB_INT32},
+      {1},
+      {tiledb::test::Compressor(TILEDB_FILTER_NONE, -1)},
+      TILEDB_ROW_MAJOR,
+      TILEDB_ROW_MAJOR,
+      1,
+      false,
+      false);
+
+  // Open array
+  tiledb_array_t* array;
+  int rc = tiledb_array_alloc(ctx_, array_name.c_str(), &array);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_array_open(ctx_, array, TILEDB_WRITE);
+  CHECK(rc == TILEDB_OK);
+
+  // Create and submit query
+  tiledb_query_t* query;
+  rc = tiledb_query_alloc(ctx_, array, TILEDB_WRITE, &query);
+  REQUIRE(rc == TILEDB_OK);
+
+  // Write "a, 1"
+  char d_data[] = "abcd";
+  uint64_t d_data_size = 1;
+  uint64_t d_off[] = {0, 1, 2, 3};
+  uint64_t d_off_size = sizeof(uint64_t);
+  int32_t a_data[] = {1, 2, 3, 4};
+  uint64_t a_size = sizeof(int32_t);
+  rc = tiledb_query_set_data_buffer(ctx_, query, "d", d_data, &d_data_size);
+  REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_query_set_offsets_buffer(ctx_, query, "d", d_off, &d_off_size);
+  rc = tiledb_query_set_data_buffer(ctx_, query, "a", a_data, &a_size);
+  REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_query_set_layout(ctx_, query, TILEDB_GLOBAL_ORDER);
+  REQUIRE(rc == TILEDB_OK);
+  if (serialize_) {
+    submit_serialized_query(ctx_, query);
+  } else {
+    rc = tiledb_query_submit(ctx_, query);
+    REQUIRE(rc == TILEDB_OK);
+  }
+  // Write "b, 2"
+  d_data[0] = 'b';
+  a_data[0] = 2;
+
+  if (serialize_) {
+    submit_and_finalize_serialized_query(ctx_, query);
+  } else {
+    rc = tiledb_query_submit(ctx_, query);
+    REQUIRE(rc == TILEDB_OK);
+    rc = tiledb_query_finalize(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+  }
+
+  // Close array
+  rc = tiledb_array_close(ctx_, array);
+  CHECK(rc == TILEDB_OK);
+
+  // Clean up
+  tiledb_array_free(&array);
+  tiledb_query_free(&query);
+
+  // Open array
+  rc = tiledb_array_alloc(ctx_, array_name.c_str(), &array);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_array_open(ctx_, array, TILEDB_READ);
+  CHECK(rc == TILEDB_OK);
+
+  // Read [a, ee]
+  std::vector<uint64_t> r_d_off(10);
+  std::string r_d_val;
+  r_d_val.resize(20);
+  std::vector<int32_t> r_a(10);
+  tiledb_query_status_t status;
+  tiledb_query_status_details_t details;
+  read_array_1d(
+      ctx_,
+      array,
+      TILEDB_GLOBAL_ORDER,
+      "a",
+      "e",
+      &r_d_off,
+      &r_d_val,
+      &r_a,
+      &status,
+      &details);
+  CHECK(status == TILEDB_COMPLETED);
+  CHECK(r_d_val == "ab");
+  std::vector<uint64_t> c_d_off = {0, 1};
+  CHECK(r_d_off == c_d_off);
+  std::vector<int32_t> c_a = {1, 2};
+  CHECK(r_a == c_a);
+
+  // Close array
+  rc = tiledb_array_close(ctx_, array);
+  CHECK(rc == TILEDB_OK);
+  tiledb_array_free(&array);
+
+  remove_temp_dir(local_fs.file_prefix() + local_fs.temp_dir());
+}
+
+TEST_CASE_METHOD(
+    StringDimsFx,
+    "C API: Test multiple var size global writes 2",
+    "[capi][sparse][var-size][multiple-global-writes-2]") {
+  SECTION("- No serialization") {
+    serialize_ = false;
+  }
+  SECTION("- Serialization") {
+#ifdef TILEDB_SERIALIZATION
+    serialize_ = true;
+#endif
+  }
+  SupportedFsLocal local_fs;
+  std::string array_name =
+      local_fs.file_prefix() + local_fs.temp_dir() + "string_dims";
+  create_temp_dir(local_fs.file_prefix() + local_fs.temp_dir());
+
+  create_array(
+      ctx_,
+      array_name,
+      TILEDB_SPARSE,
+      {"d"},
+      {TILEDB_STRING_ASCII},
+      {nullptr},
+      {nullptr},
+      {"a"},
+      {TILEDB_INT32},
+      {1},
+      {tiledb::test::Compressor(TILEDB_FILTER_NONE, -1)},
+      TILEDB_ROW_MAJOR,
+      TILEDB_ROW_MAJOR,
+      1,
+      false,
+      false);
+
+  // Open array
+  tiledb_array_t* array;
+  int rc = tiledb_array_alloc(ctx_, array_name.c_str(), &array);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_array_open(ctx_, array, TILEDB_WRITE);
+  CHECK(rc == TILEDB_OK);
+
+  // Create and submit query
+  tiledb_query_t* query;
+  rc = tiledb_query_alloc(ctx_, array, TILEDB_WRITE, &query);
+  REQUIRE(rc == TILEDB_OK);
+
+  // Write "a, 1"
+  char d_data[] = "abcd";
+  uint64_t d_data_size = 1;
+  uint64_t d_off[] = {0, 1, 2, 3};
+  uint64_t d_off_size = sizeof(uint64_t);
+  int32_t a_data[] = {1, 2, 3, 4};
+  uint64_t a_size = sizeof(int32_t);
+  rc = tiledb_query_set_data_buffer(ctx_, query, "d", d_data, &d_data_size);
+  REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_query_set_offsets_buffer(ctx_, query, "d", d_off, &d_off_size);
+  rc = tiledb_query_set_data_buffer(ctx_, query, "a", a_data, &a_size);
+  REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_query_set_layout(ctx_, query, TILEDB_GLOBAL_ORDER);
+  REQUIRE(rc == TILEDB_OK);
+
+  if (serialize_) {
+    submit_serialized_query(ctx_, query);
+  } else {
+    rc = tiledb_query_submit(ctx_, query);
+    REQUIRE(rc == TILEDB_OK);
+  }
+  // Write "b, 2"
+  d_data[0] = 'b';
+  a_data[0] = 2;
+
+  if (serialize_) {
+    submit_serialized_query(ctx_, query);
+  } else {
+    rc = tiledb_query_submit(ctx_, query);
+    REQUIRE(rc == TILEDB_OK);
+  }
+
+  // Write c, 3; d, 4 and e, 5.
+  d_data[0] = 'c';
+  d_data[1] = 'd';
+  d_data[2] = 'e';
+  d_data_size = 3;
+  d_off_size = 3 * sizeof(uint64_t);
+  a_data[0] = 3;
+  a_data[1] = 4;
+  a_data[2] = 5;
+  a_size = 3 * sizeof(int32_t);
+
+  if (serialize_) {
+    submit_and_finalize_serialized_query(ctx_, query);
+  } else {
+    rc = tiledb_query_submit(ctx_, query);
+    REQUIRE(rc == TILEDB_OK);
+    rc = tiledb_query_finalize(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+  }
+
+  // Close array
+  rc = tiledb_array_close(ctx_, array);
+  CHECK(rc == TILEDB_OK);
+
+  // Clean up
+  tiledb_array_free(&array);
+  tiledb_query_free(&query);
+
+  // Open array
+  rc = tiledb_array_alloc(ctx_, array_name.c_str(), &array);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_array_open(ctx_, array, TILEDB_READ);
+  CHECK(rc == TILEDB_OK);
+
+  // Read [a, ee]
+  std::vector<uint64_t> r_d_off(10);
+  std::string r_d_val;
+  r_d_val.resize(20);
+  std::vector<int32_t> r_a(10);
+  tiledb_query_status_t status;
+  tiledb_query_status_details_t details;
+  read_array_1d(
+      ctx_,
+      array,
+      TILEDB_GLOBAL_ORDER,
+      "a",
+      "e",
+      &r_d_off,
+      &r_d_val,
+      &r_a,
+      &status,
+      &details);
+  CHECK(status == TILEDB_COMPLETED);
+  CHECK(r_d_val == "abcde");
+  std::vector<uint64_t> c_d_off = {0, 1, 2, 3, 4};
+  CHECK(r_d_off == c_d_off);
+  std::vector<int32_t> c_a = {1, 2, 3, 4, 5};
+  CHECK(r_a == c_a);
+
+  // Close array
+  rc = tiledb_array_close(ctx_, array);
+  CHECK(rc == TILEDB_OK);
+  tiledb_array_free(&array);
+
+  remove_temp_dir(local_fs.file_prefix() + local_fs.temp_dir());
+}
+
+TEST_CASE_METHOD(
+    StringDimsFx,
+    "C API: Test sparse array with string dimensions, 2d, default ranges",
+    "[capi][sparse][string-dims][2d][default-ranges]") {
+  SECTION("- No serialization") {
+    serialize_ = false;
+  }
+  SECTION("- Serialization") {
+#ifdef TILEDB_SERIALIZATION
+    serialize_ = true;
+#endif
+  }
+  SupportedFsLocal local_fs;
+  std::string array_name =
+      local_fs.file_prefix() + local_fs.temp_dir() + "string_dims";
+  create_temp_dir(local_fs.file_prefix() + local_fs.temp_dir());
+
+  // Create array
+  int32_t dom[] = {1, 10};
+  int32_t extent = 5;
+  create_array(
+      ctx_,
+      array_name,
+      TILEDB_SPARSE,
+      {"d1", "d2"},
+      {TILEDB_STRING_ASCII, TILEDB_INT32},
+      {nullptr, dom},
+      {nullptr, &extent},
+      {"a"},
+      {TILEDB_INT32},
+      {1},
+      {tiledb::test::Compressor(TILEDB_FILTER_NONE, -1)},
+      TILEDB_ROW_MAJOR,
+      TILEDB_ROW_MAJOR,
+      2,
+      false,
+      false);
+
+  // Write
+  tiledb_layout_t write_layout = TILEDB_UNORDERED;
+  SECTION("Unordered write") {
+    write_layout = TILEDB_UNORDERED;
+  }
+  SECTION("Global write") {
+    write_layout = TILEDB_GLOBAL_ORDER;
+  }
+  std::vector<uint64_t> d1_off = {0, 2, 4, 6};
+  std::string d1_val("aabbccdddd");
+  std::vector<int32_t> d2 = {1, 2, 3, 4};
+  std::vector<int32_t> a = {11, 12, 13, 14};
+  write_array_2d(ctx_, array_name, write_layout, d1_off, d1_val, d2, a);
+
+  // ####### READ #######
+
+  // Check non-empty domain
+  std::string start, end;
+  int32_t is_empty;
+  get_non_empty_domain_var(array_name, "d1", &start, &end, &is_empty);
+  CHECK(is_empty == 0);
+  CHECK(start == "aa");
+  CHECK(end == "dddd");
+  std::vector<int32_t> non_empty;
+  get_non_empty_domain(array_name, "d2", &non_empty, &is_empty);
+  CHECK(is_empty == 0);
+  CHECK(non_empty[0] == 1);
+  CHECK(non_empty[1] == 4);
+
+  // Open array
+  tiledb_array_t* array;
+  int rc = tiledb_array_alloc(ctx_, array_name.c_str(), &array);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_array_open(ctx_, array, TILEDB_READ);
+  CHECK(rc == TILEDB_OK);
+
+  // Set layout
+  tiledb_layout_t layout = TILEDB_ROW_MAJOR;
+
+  SECTION("Global order") {
+    layout = TILEDB_GLOBAL_ORDER;
+  }
+  SECTION("Row-major read") {
+    layout = TILEDB_ROW_MAJOR;
+  }
+  SECTION("Col-major") {
+    layout = TILEDB_COL_MAJOR;
+  }
+  SECTION("Unordered") {
+    layout = TILEDB_UNORDERED;
+  }
+
+  // Read [a, e], [1, 10]
+  std::vector<uint64_t> r_d1_off(10);
+  std::string r_d1_val;
+  r_d1_val.resize(20);
+  std::vector<int32_t> r_d2(10);
+  std::vector<int32_t> r_a(10);
+  tiledb_query_status_t status;
+  read_array_2d_default_string_range(
+      ctx_, array, layout, 1, 10, &r_d1_off, &r_d1_val, &r_d2, &r_a, &status);
+  CHECK(status == TILEDB_COMPLETED);
+  CHECK(r_d1_val == "aabbccdddd");
+  std::vector<uint64_t> c_d1_off = {0, 2, 4, 6};
+  CHECK(r_d1_off == c_d1_off);
+  std::vector<int32_t> c_d2 = {1, 2, 3, 4};
+  CHECK(r_d2 == c_d2);
+  std::vector<int32_t> c_a = {11, 12, 13, 14};
+  CHECK(r_a == c_a);
+
+  // Close array
+  rc = tiledb_array_close(ctx_, array);
+  CHECK(rc == TILEDB_OK);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+  // Write again
+  d1_off = {0, 1, 2};
+  d1_val = "abff";
+  d2 = {2, 2, 3};
+  a = {15, 16, 17};
+  write_array_2d(ctx_, array_name, write_layout, d1_off, d1_val, d2, a);
+
+  std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+  // Create config
+  tiledb_config_t* config = nullptr;
+  tiledb_error_t* error = nullptr;
+  rc = tiledb_config_alloc(&config, &error);
+  CHECK(rc == TILEDB_OK);
+  CHECK(error == nullptr);
+  rc = tiledb_config_set(
+      config, "sm.consolidation.mode", "fragment_meta", &error);
+  CHECK(rc == TILEDB_OK);
+
+  // Consolidate fragment metadata
+  rc = tiledb_array_consolidate(ctx_, array_name.c_str(), config);
+  CHECK(rc == TILEDB_OK);
+  tiledb_array_free(&array);
+
+  // Open array
+  rc = tiledb_array_alloc(ctx_, array_name.c_str(), &array);
+  CHECK(rc == TILEDB_OK);
+  rc = tiledb_array_open(ctx_, array, TILEDB_READ);
+  CHECK(rc == TILEDB_OK);
+
+  // Read [a, ff], [1, 10]
+  r_d1_off.resize(20);
+  r_d1_val.resize(20);
+  r_d2.resize(20);
+  r_a.resize(20);
+  read_array_2d_default_string_range(
+      ctx_,
+      array,
+      TILEDB_GLOBAL_ORDER,
+      1,
+      10,
+      &r_d1_off,
+      &r_d1_val,
+      &r_d2,
+      &r_a,
+      &status);
+  CHECK(status == TILEDB_COMPLETED);
+  CHECK(r_d1_val == "aaabbbccddddff");
+  c_d1_off = {0, 1, 3, 4, 6, 8, 12};
+  CHECK(r_d1_off == c_d1_off);
+  c_d2 = {2, 1, 2, 2, 3, 4, 3};
+  CHECK(r_d2 == c_d2);
+  c_a = {15, 11, 16, 12, 13, 14, 17};
+  CHECK(r_a == c_a);
+
+  // Close array
+  rc = tiledb_array_close(ctx_, array);
+  CHECK(rc == TILEDB_OK);
+  tiledb_array_free(&array);
+
+  // Clean up
   tiledb_config_free(&config);
 
   remove_temp_dir(local_fs.file_prefix() + local_fs.temp_dir());

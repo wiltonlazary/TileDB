@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2018-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2018-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -66,10 +66,11 @@ void write_array_1() {
 
   // Prepare some data for the array
   std::vector<int> data = {1, 2, 3, 4, 5, 6, 7, 8};
-  std::vector<int> subarray = {1, 2, 1, 4};
 
   // Open the array for writing and create the query.
   Array array(ctx, array_name, TILEDB_WRITE);
+  Subarray subarray(ctx, array);
+  subarray.add_range(0, 1, 2).add_range(1, 1, 4);
   Query query(ctx, array);
   query.set_layout(TILEDB_ROW_MAJOR)
       .set_data_buffer("a", data)
@@ -85,10 +86,11 @@ void write_array_2() {
 
   // Prepare some data for the array
   std::vector<int> data = {101, 102, 103, 104};
-  std::vector<int> subarray = {2, 3, 2, 3};
 
   // Open the array for writing and create the query.
   Array array(ctx, array_name, TILEDB_WRITE);
+  Subarray subarray(ctx, array);
+  subarray.add_range(0, 2, 3).add_range(1, 2, 3);
   Query query(ctx, array);
   query.set_layout(TILEDB_ROW_MAJOR)
       .set_data_buffer("a", data)
@@ -103,17 +105,36 @@ void write_array_3() {
   Context ctx;
 
   // Prepare some data for the array
-  std::vector<int> data = {201, 202};
-  std::vector<int> coords_rows = {1, 3};
-  std::vector<int> coords_cols = {1, 4};
+  std::vector<int> data = {201};
 
   // Open the array for writing and create the query.
   Array array(ctx, array_name, TILEDB_WRITE);
+  Subarray subarray(ctx, array);
+  subarray.add_range(0, 1, 1).add_range(1, 1, 1);
   Query query(ctx, array);
-  query.set_layout(TILEDB_UNORDERED)
+  query.set_layout(TILEDB_ROW_MAJOR)
       .set_data_buffer("a", data)
-      .set_data_buffer("rows", coords_rows)
-      .set_data_buffer("cols", coords_cols);
+      .set_subarray(subarray);
+
+  // Perform the write and close the array.
+  query.submit();
+  array.close();
+}
+
+void write_array_4() {
+  Context ctx;
+
+  // Prepare some data for the array
+  std::vector<int> data = {202};
+
+  // Open the array for writing and create the query.
+  Array array(ctx, array_name, TILEDB_WRITE);
+  Subarray subarray(ctx, array);
+  subarray.add_range(0, 3, 3).add_range(1, 4, 4);
+  Query query(ctx, array);
+  query.set_layout(TILEDB_ROW_MAJOR)
+      .set_data_buffer("a", data)
+      .set_subarray(subarray);
 
   // Perform the write and close the array.
   query.submit();
@@ -127,7 +148,8 @@ void read_array() {
   Array array(ctx, array_name, TILEDB_READ);
 
   // Read the entire array
-  const std::vector<int> subarray = {1, 4, 1, 4};
+  Subarray subarray(ctx, array);
+  subarray.add_range(0, 1, 4).add_range(1, 1, 4);
 
   // Prepare the vector that will hold the result
   std::vector<int> data(16);
@@ -164,6 +186,7 @@ int main(int argc, char* argv[]) {
     write_array_1();
     write_array_2();
     write_array_3();
+    write_array_4();
   }
 
   // Optionally consolidate

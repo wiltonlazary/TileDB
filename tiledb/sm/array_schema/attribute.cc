@@ -36,13 +36,15 @@
 #include "tiledb/sm/enums/datatype.h"
 #include "tiledb/sm/enums/filter_type.h"
 #include "tiledb/sm/filter/compression_filter.h"
-#include "tiledb/sm/misc/utils.h"
+#include "tiledb/sm/misc/parse_argument.h"
+#include "tiledb/type/range/range.h"
 
 #include <cassert>
 #include <iostream>
 #include <sstream>
 
 using namespace tiledb::common;
+using namespace tiledb::type;
 
 namespace tiledb {
 namespace sm {
@@ -62,6 +64,23 @@ Attribute::Attribute(
   nullable_ = nullable;
   cell_val_num_ = (type == Datatype::ANY) ? constants::var_num : 1;
   set_default_fill_value();
+}
+
+Attribute::Attribute(
+    const std::string& name,
+    Datatype type,
+    bool nullable,
+    uint32_t cell_val_num,
+    const FilterPipeline& filter_pipeline,
+    const ByteVecValue& fill_value,
+    uint8_t fill_value_validity)
+    : cell_val_num_(cell_val_num)
+    , nullable_(nullable)
+    , filters_(filter_pipeline)
+    , name_(name)
+    , type_(type)
+    , fill_value_(fill_value)
+    , fill_value_validity_(fill_value_validity) {
 }
 
 Attribute::Attribute(const Attribute* attr) {
@@ -92,47 +111,58 @@ unsigned int Attribute::cell_val_num() const {
   return cell_val_num_;
 }
 
-Status Attribute::deserialize(ConstBuffer* buff, const uint32_t version) {
+Attribute Attribute::deserialize(
+    Deserializer& deserializer, const uint32_t version) {
   // Load attribute name
-  uint32_t attribute_name_size;
-  RETURN_NOT_OK(buff->read(&attribute_name_size, sizeof(uint32_t)));
-  name_.resize(attribute_name_size);
-  RETURN_NOT_OK(buff->read(&name_[0], attribute_name_size));
+  auto attribute_name_size = deserializer.read<uint32_t>();
+  std::string name(
+      deserializer.get_ptr<char>(attribute_name_size), attribute_name_size);
 
   // Load type
-  uint8_t type;
-  RETURN_NOT_OK(buff->read(&type, sizeof(uint8_t)));
-  type_ = (Datatype)type;
+  auto type = deserializer.read<uint8_t>();
 
-  // Load cell_val_num_
-  RETURN_NOT_OK(buff->read(&cell_val_num_, sizeof(uint32_t)));
+  Datatype datatype = static_cast<Datatype>(type);
+
+  // Load cell_val_num
+  auto cell_val_num = deserializer.read<uint32_t>();
 
   // Load filter pipeline
-  RETURN_NOT_OK(filters_.deserialize(buff));
+  auto filterpipeline{FilterPipeline::deserialize(deserializer, version)};
 
   // Load fill value
+  uint64_t fill_value_size = 0;
+  ByteVecValue fill_value;
   if (version >= 6) {
-    uint64_t fill_value_size = 0;
-    RETURN_NOT_OK(buff->read(&fill_value_size, sizeof(uint64_t)));
+    fill_value_size = deserializer.read<uint64_t>();
     assert(fill_value_size > 0);
-    fill_value_.resize(fill_value_size);
-    fill_value_.shrink_to_fit();
-    RETURN_NOT_OK(buff->read(fill_value_.data(), fill_value_size));
+    fill_value.resize(fill_value_size);
+    fill_value.shrink_to_fit();
+    deserializer.read(fill_value.data(), fill_value_size);
   } else {
-    set_default_fill_value();
+    fill_value = default_fill_value(datatype, cell_val_num);
   }
 
   // Load nullable flag
-  if (version >= 7)
-    RETURN_NOT_OK(buff->read(&nullable_, sizeof(bool)));
+  bool nullable = false;
+  if (version >= 7) {
+    nullable = deserializer.read<bool>();
+  }
 
   // Load validity fill value
-  if (version >= 7)
-    RETURN_NOT_OK(buff->read(&fill_value_validity_, sizeof(uint8_t)));
+  uint8_t fill_value_validity = 0;
+  if (version >= 7) {
+    fill_value_validity = deserializer.read<uint8_t>();
+  }
 
-  return Status::Ok();
+  return Attribute(
+      name,
+      datatype,
+      nullable,
+      cell_val_num,
+      filterpipeline,
+      fill_value,
+      fill_value_validity);
 }
-
 void Attribute::dump(FILE* out) const {
   if (out == nullptr)
     out = stdout;
@@ -174,44 +204,45 @@ const std::string& Attribute::name() const {
 // fill_value (uint8_t[])
 // nullable (bool)
 // fill_value_validity (uint8_t)
-Status Attribute::serialize(Buffer* buff, const uint32_t version) {
+void Attribute::serialize(
+    Serializer& serializer, const uint32_t version) const {
   // Write attribute name
   auto attribute_name_size = (uint32_t)name_.size();
-  RETURN_NOT_OK(buff->write(&attribute_name_size, sizeof(uint32_t)));
-  RETURN_NOT_OK(buff->write(name_.c_str(), attribute_name_size));
+  serializer.write<uint32_t>(attribute_name_size);
+  serializer.write(name_.data(), attribute_name_size);
 
   // Write type
   auto type = (uint8_t)type_;
-  RETURN_NOT_OK(buff->write(&type, sizeof(uint8_t)));
+  serializer.write<uint8_t>(type);
 
   // Write cell_val_num_
-  RETURN_NOT_OK(buff->write(&cell_val_num_, sizeof(uint32_t)));
+  serializer.write<uint32_t>(cell_val_num_);
 
   // Write filter pipeline
-  RETURN_NOT_OK(filters_.serialize(buff));
+  filters_.serialize(serializer);
 
   // Write fill value
   if (version >= 6) {
     auto fill_value_size = (uint64_t)fill_value_.size();
     assert(fill_value_size != 0);
-    RETURN_NOT_OK(buff->write(&fill_value_size, sizeof(uint64_t)));
-    RETURN_NOT_OK(buff->write(fill_value_.data(), fill_value_.size()));
+    serializer.write<uint64_t>(fill_value_size);
+    serializer.write(fill_value_.data(), fill_value_.size());
   }
 
   // Write nullable
-  if (version >= 7)
-    RETURN_NOT_OK(buff->write(&nullable_, sizeof(bool)));
+  if (version >= 7) {
+    serializer.write<uint8_t>(nullable_);
+  }
 
   // Write validity fill value
-  if (version >= 7)
-    RETURN_NOT_OK(buff->write(&fill_value_validity_, sizeof(uint8_t)));
-
-  return Status::Ok();
+  if (version >= 7) {
+    serializer.write<uint8_t>(fill_value_validity_);
+  }
 }
 
 Status Attribute::set_cell_val_num(unsigned int cell_val_num) {
   if (type_ == Datatype::ANY)
-    return LOG_STATUS(Status::AttributeError(
+    return LOG_STATUS(Status_AttributeError(
         "Cannot set number of values per cell; Attribute datatype `ANY` is "
         "always variable-sized"));
 
@@ -231,21 +262,31 @@ Status Attribute::get_nullable(bool* const nullable) {
   return Status::Ok();
 }
 
-Status Attribute::set_filter_pipeline(const FilterPipeline* pipeline) {
-  if (pipeline == nullptr)
-    return LOG_STATUS(Status::AttributeError(
-        "Cannot set filter pipeline to attribute; Pipeline cannot be null"));
-
-  for (unsigned i = 0; i < pipeline->size(); ++i) {
+Status Attribute::set_filter_pipeline(const FilterPipeline& pipeline) {
+  for (unsigned i = 0; i < pipeline.size(); ++i) {
     if (datatype_is_real(type_) &&
-        pipeline->get_filter(i)->type() == FilterType::FILTER_DOUBLE_DELTA)
+        pipeline.get_filter(i)->type() == FilterType::FILTER_DOUBLE_DELTA)
       return LOG_STATUS(
-          Status::AttributeError("Cannot set DOUBLE DELTA filter to a "
-                                 "dimension with a real datatype"));
+          Status_AttributeError("Cannot set DOUBLE DELTA filter to an "
+                                "attribute with a real datatype"));
   }
 
-  filters_ = *pipeline;
+  if (type_ == Datatype::STRING_ASCII && var_size() && pipeline.size() > 1) {
+    if (pipeline.has_filter(FilterType::FILTER_RLE) &&
+        pipeline.get_filter(0)->type() != FilterType::FILTER_RLE) {
+      return LOG_STATUS(Status_ArraySchemaError(
+          "RLE filter must be the first filter to apply when used on a "
+          "variable length string attribute"));
+    }
+    if (pipeline.has_filter(FilterType::FILTER_DICTIONARY) &&
+        pipeline.get_filter(0)->type() != FilterType::FILTER_DICTIONARY) {
+      return LOG_STATUS(Status_ArraySchemaError(
+          "Dictionary filter must be the first filter to apply when used on a "
+          "variable length string attribute"));
+    }
+  }
 
+  filters_ = pipeline;
   return Status::Ok();
 }
 
@@ -255,22 +296,22 @@ void Attribute::set_name(const std::string& name) {
 
 Status Attribute::set_fill_value(const void* value, uint64_t size) {
   if (value == nullptr) {
-    return LOG_STATUS(Status::AttributeError(
+    return LOG_STATUS(Status_AttributeError(
         "Cannot set fill value; Input value cannot be null"));
   }
 
   if (size == 0) {
-    return LOG_STATUS(Status::AttributeError(
-        "Cannot set fill value; Input size cannot be 0"));
+    return LOG_STATUS(
+        Status_AttributeError("Cannot set fill value; Input size cannot be 0"));
   }
 
   if (nullable()) {
     return LOG_STATUS(
-        Status::AttributeError("Cannot set fill value; Attribute is nullable"));
+        Status_AttributeError("Cannot set fill value; Attribute is nullable"));
   }
 
   if (!var_size() && size != cell_size()) {
-    return LOG_STATUS(Status::AttributeError(
+    return LOG_STATUS(Status_AttributeError(
         "Cannot set fill value; Input size is not the same as cell size"));
   }
 
@@ -283,18 +324,18 @@ Status Attribute::set_fill_value(const void* value, uint64_t size) {
 
 Status Attribute::get_fill_value(const void** value, uint64_t* size) const {
   if (value == nullptr) {
-    return LOG_STATUS(Status::AttributeError(
+    return LOG_STATUS(Status_AttributeError(
         "Cannot get fill value; Input value cannot be null"));
   }
 
   if (size == nullptr) {
-    return LOG_STATUS(Status::AttributeError(
+    return LOG_STATUS(Status_AttributeError(
         "Cannot get fill value; Input size cannot be null"));
   }
 
   if (nullable()) {
     return LOG_STATUS(
-        Status::AttributeError("Cannot get fill value; Attribute is nullable"));
+        Status_AttributeError("Cannot get fill value; Attribute is nullable"));
   }
 
   *value = fill_value_.data();
@@ -306,22 +347,22 @@ Status Attribute::get_fill_value(const void** value, uint64_t* size) const {
 Status Attribute::set_fill_value(
     const void* value, uint64_t size, uint8_t valid) {
   if (value == nullptr) {
-    return LOG_STATUS(Status::AttributeError(
+    return LOG_STATUS(Status_AttributeError(
         "Cannot set fill value; Input value cannot be null"));
   }
 
   if (size == 0) {
-    return LOG_STATUS(Status::AttributeError(
-        "Cannot set fill value; Input size cannot be 0"));
+    return LOG_STATUS(
+        Status_AttributeError("Cannot set fill value; Input size cannot be 0"));
   }
 
   if (!nullable()) {
-    return LOG_STATUS(Status::AttributeError(
+    return LOG_STATUS(Status_AttributeError(
         "Cannot set fill value; Attribute is not nullable"));
   }
 
   if (!var_size() && size != cell_size()) {
-    return LOG_STATUS(Status::AttributeError(
+    return LOG_STATUS(Status_AttributeError(
         "Cannot set fill value; Input size is not the same as cell size"));
   }
 
@@ -336,17 +377,17 @@ Status Attribute::set_fill_value(
 Status Attribute::get_fill_value(
     const void** value, uint64_t* size, uint8_t* valid) const {
   if (value == nullptr) {
-    return LOG_STATUS(Status::AttributeError(
+    return LOG_STATUS(Status_AttributeError(
         "Cannot get fill value; Input value cannot be null"));
   }
 
   if (size == nullptr) {
-    return LOG_STATUS(Status::AttributeError(
+    return LOG_STATUS(Status_AttributeError(
         "Cannot get fill value; Input size cannot be null"));
   }
 
   if (!nullable()) {
-    return LOG_STATUS(Status::AttributeError(
+    return LOG_STATUS(Status_AttributeError(
         "Cannot get fill value; Attribute is not nullable"));
   }
 
@@ -396,6 +437,25 @@ void Attribute::set_default_fill_value() {
   }
 
   fill_value_validity_ = 0;
+}
+
+ByteVecValue Attribute::default_fill_value(
+    Datatype datatype, uint32_t cell_val_num) {
+  ByteVecValue fillvalue;
+  auto fill_value = constants::fill_value(datatype);
+  auto fill_size = datatype_size(datatype);
+  if (cell_val_num == constants::var_num) {
+    cell_val_num = 1;
+  }
+  fillvalue.resize(cell_val_num * fill_size);
+  fillvalue.shrink_to_fit();
+  uint64_t offset = 0;
+  auto buff = (unsigned char*)fillvalue.data();
+  for (uint64_t i = 0; i < cell_val_num; ++i) {
+    std::memcpy(buff + offset, fill_value, fill_size);
+    offset += fill_size;
+  }
+  return fillvalue;
 }
 
 std::string Attribute::fill_value_str() const {

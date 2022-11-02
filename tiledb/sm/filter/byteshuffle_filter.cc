@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -36,7 +36,7 @@
 #include "tiledb/sm/enums/filter_type.h"
 #include "tiledb/sm/tile/tile.h"
 
-#include "blosc/shuffle.h"
+#include "blosc/tiledb-shuffle.h"
 
 using namespace tiledb::common;
 
@@ -59,6 +59,8 @@ void ByteshuffleFilter::dump(FILE* out) const {
 }
 
 Status ByteshuffleFilter::run_forward(
+    const Tile& tile,
+    Tile* const,  // offsets_tile,
     FilterBuffer* input_metadata,
     FilterBuffer* input,
     FilterBuffer* output_metadata,
@@ -81,7 +83,7 @@ Status ByteshuffleFilter::run_forward(
     auto part_size = (uint32_t)part.size();
     RETURN_NOT_OK(output_metadata->write(&part_size, sizeof(uint32_t)));
 
-    RETURN_NOT_OK(shuffle_part(&part, output_buf));
+    RETURN_NOT_OK(shuffle_part(tile, &part, output_buf));
 
     if (output_buf->owns_data())
       output_buf->advance_size(part.size());
@@ -92,8 +94,8 @@ Status ByteshuffleFilter::run_forward(
 }
 
 Status ByteshuffleFilter::shuffle_part(
-    const ConstBuffer* part, Buffer* output) const {
-  auto tile_type = pipeline_->current_tile()->type();
+    const Tile& tile, const ConstBuffer* part, Buffer* output) const {
+  auto tile_type = tile.type();
   auto tile_type_size = static_cast<uint8_t>(datatype_size(tile_type));
 
   blosc::shuffle(
@@ -106,6 +108,8 @@ Status ByteshuffleFilter::shuffle_part(
 }
 
 Status ByteshuffleFilter::run_reverse(
+    const Tile& tile,
+    Tile* const,
     FilterBuffer* input_metadata,
     FilterBuffer* input,
     FilterBuffer* output_metadata,
@@ -127,7 +131,7 @@ Status ByteshuffleFilter::run_reverse(
     ConstBuffer part(nullptr, 0);
     RETURN_NOT_OK(input->get_const_buffer(part_size, &part));
 
-    RETURN_NOT_OK(unshuffle_part(&part, output_buf));
+    RETURN_NOT_OK(unshuffle_part(tile, &part, output_buf));
 
     if (output_buf->owns_data())
       output_buf->advance_size(part_size);
@@ -145,8 +149,8 @@ Status ByteshuffleFilter::run_reverse(
 }
 
 Status ByteshuffleFilter::unshuffle_part(
-    const ConstBuffer* part, Buffer* output) const {
-  auto tile_type = pipeline_->current_tile()->type();
+    const Tile& tile, const ConstBuffer* part, Buffer* output) const {
+  auto tile_type = tile.type();
   auto tile_type_size = static_cast<uint8_t>(datatype_size(tile_type));
 
   blosc::unshuffle(

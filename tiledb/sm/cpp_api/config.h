@@ -49,10 +49,13 @@ class Config;  // Forward decl for impl classes
 
 namespace impl {
 
-class ConfigIter : public std::iterator<
-                       std::forward_iterator_tag,
-                       const std::pair<std::string, std::string>> {
+class ConfigIter {
  public:
+  using iterator_category = std::forward_iterator_tag;
+  using value_type = const std::pair<std::string, std::string>;
+  using difference_type = std::ptrdiff_t;
+  using pointer = value_type*;
+  using reference = value_type&;
   /* ********************************* */
   /*     CONSTRUCTORS & DESTRUCTORS    */
   /* ********************************* */
@@ -262,6 +265,10 @@ class Config {
    *
    * **Parameters**
    *
+   * - `sm.allow_updates_experimental` <br>
+   *    **Experimental** <br>
+   *    Allow update queries. Experimental for testing purposes, do not use.<br>
+   *    **Default**: false
    * - `sm.dedup_coords` <br>
    *    If `true`, cells with duplicate coordinates will be removed during
    *    sparse fragment writes. Note that ties during deduplication are broken
@@ -304,26 +311,21 @@ class Config {
    *    Upper-bound on number of threads to allocate for IO-bound tasks. <br>
    *    **Default*: # cores
    * - `sm.vacuum.mode` <br>
-   *    The vacuuming mode, one of `fragments` (remove consolidated fragments),
-   *    `fragment_meta` (remove only consolidated fragment metadata), or
-   *    `array_meta` (remove consolidated array metadata files). <br>
-   *    **Default**: fragments
-   * - `sm.vacuum.timestamp_start` <br>
-   *    **Experimental** <br>
-   *    When set, an array will be vacuumed between this value and
-   *    `sm.vacuum.timestamp_end` (inclusive). <br>
-   *    Only for `fragments` and `array_meta` vacuum mode. <br>
-   *    **Default**: 0
-   * - `sm.vacuum.timestamp_end` <br>
-   *    **Experimental** <br>
-   *    When set, an array will be vacuumed between `sm.vacuum.timestamp_start`
-   *    and this value (inclusive). <br>
-   *    Only for `fragments` and `array_meta` vacuum mode. <br>
-   *    **Default**: UINT64_MAX
+   *    The vacuuming mode, one of
+   *    `commits` (remove only consolidated commit files),
+   *    `fragments` (remove only consolidated fragments),
+   *    `fragment_meta` (remove only consolidated fragment metadata),
+   *    `array_meta` (remove only consolidated array metadata files), or
+   *    `group_meta` (remove only consolidate group metadata only).
+   *    <br>
+   *    **Default**: "fragments"
    * - `sm.consolidation_mode` <br>
-   *    The consolidation mode, one of `fragments` (consolidate all fragments),
+   *    The consolidation mode, one of
+   *    `commits` (consolidate all commit files),
+   *    `fragments` (consolidate all fragments),
    *    `fragment_meta` (consolidate only fragment metadata footers to a single
-   *    file), or `array_meta` (consolidate array metadata only). <br>
+   * file), `array_meta` (consolidate array metadata only), or `group_meta`
+   * (consolidate group metadata only). <br>
    *    **Default**: "fragments"
    * - `sm.consolidation.amplification` <br>
    *    The factor by which the size of the dense fragment resulting
@@ -338,10 +340,21 @@ class Config {
    *    The size (in bytes) of the attribute buffers used during
    *    consolidation. <br>
    *    **Default**: 50,000,000
+   * - `sm.consolidation.max_fragment_size` <br>
+   *    **Experimental** <br>
+   *    The size (in bytes) of the maximum on-disk fragment size that will be
+   *    created by consolidation. When it is reached, consolidation will
+   *    continue the operation in a new fragment. The result will be a multiple
+   *    fragments, but with seperate MBRs. <br>
+   *    **Default**: UINT64_MAX
    * - `sm.consolidation.steps` <br>
    *    The number of consolidation steps to be performed when executing
    *    the consolidation algorithm.<br>
    *    **Default**: 1
+   * - `sm.consolidation.purge_deleted_cells` <br>
+   *    **Experimental** <br>
+   *    Purge deleted cells from the consolidated fragment or not.<br>
+   *    **Default**: false
    * - `sm.consolidation.step_min_frags` <br>
    *    The minimum number of fragments to consolidate in a single step.<br>
    *    **Default**: UINT32_MAX
@@ -384,9 +397,22 @@ class Config {
    *    The offsets format (`bytes` or `elements`) to be used for
    *    var-sized attributes.<br>
    *    **Default**: bytes
-   * - `sm.use_refactored_readers` <br>
-   *    Use the refactored readers or not. <br>
+   * - `sm.query.dense.qc_coords_mode` <br>
+   *    **Experimental** <br>
+   *    Reads only the coordinates of the dense query that matched the query
+   *    condition.<br>
    *    **Default**: false
+   * - `sm.query.dense.reader` <br>
+   *    Which reader to use for dense queries. "refactored" or "legacy".<br>
+   *    **Default**: refactored
+   * - `sm.query.sparse_global_order.reader` <br>
+   *    Which reader to use for sparse global order queries. "refactored"
+   *    or "legacy".<br>
+   *    **Default**: legacy
+   * - `sm.query.sparse_unordered_with_dups.reader` <br>
+   *    Which reader to use for sparse unordered with dups queries.
+   *    "refactored" or "legacy".<br>
+   *    **Default**: refactored
    * - `sm.mem.malloc_trim` <br>
    *    Should malloc_trim be called on context and query destruction? This
    *    might reduce residual memory usage. <br>
@@ -410,14 +436,6 @@ class Config {
    *    Ratio of the budget allocated for array data in the sparse global
    *    order reader. <br>
    *    **Default**: 0.1
-   * - `sm.mem.reader.sparse_global_order.ratio_result_tiles` <br>
-   *    Ratio of the budget allocated for result tiles in the sparse global
-   *    order reader. <br>
-   *    **Default**: 0.05
-   * - `sm.mem.reader.sparse_global_order.ratio_rcs` <br>
-   *    Ratio of the budget allocated for result cell slabs in the sparse
-   *    global order reader. <br>
-   *    **Default**: 0.05
    * - `sm.mem.reader.sparse_unordered_with_dups.ratio_coords` <br>
    *    Ratio of the budget allocated for coordinates in the sparse unordered
    *    with duplicates reader. <br>
@@ -434,16 +452,20 @@ class Config {
    *    Ratio of the budget allocated for array data in the sparse unordered
    *    with duplicates reader. <br>
    *    **Default**: 0.1
-   * - `sm.mem.reader.sparse_unordered_with_dups.ratio_result_tiles` <br>
-   *    Ratio of the budget allocated for result tiles in the sparse
-   *    unordered with duplicates reader. <br>
-   *    **Default**: 0.05
-   * - `sm.mem.reader.sparse_unordered_with_dups.ratio_rcs` <br>
-   *    Ratio of the budget allocated for result cell slabs in the sparse
-   *    unordered with duplicates reader. <br>
-   * - `vfs.read_ahead_size` <br>
    *    The maximum byte size to read-ahead from the backend. <br>
    *    **Default**: 102400
+   * - `sm.group.timestamp_start` <br>
+   *    The start timestamp used for opening the group. <br>
+   *    **Default**: 0
+   * - `sm.group.timestamp_end` <br>
+   *    The end timestamp used for opening the group. <br>
+   *    Also used for the write timestamp if set. <br>
+   *    **Default**: UINT64_MAX
+   * - `sm.fragment_info.preload_mbrs` <br>
+   *    If `true` MBRs will be loaded at the same time as the rest of fragment
+   *    info, otherwise they will be loaded lazily when some info related to
+   *    MBRs is requested by the user. <br>
+   *    **Default**: false
    * -  `vfs.read_ahead_cache_size` <br>
    *    The the total maximum size of the read-ahead cache, which is an LRU.
    *    <br>
@@ -453,12 +475,19 @@ class Config {
    *    (except parallel S3 writes, which are controlled by
    *    `vfs.s3.multipart_part_size`.) <br>
    *    **Default**: 10MB
+   * - `vfs.max_batch_size` <br>
+   *    The maximum number of bytes in a VFS read operation<br>
+   *    **Default**: UINT64_MAX
    * - `vfs.min_batch_size` <br>
    *    The minimum number of bytes in a VFS read operation<br>
    *    **Default**: 20MB
    * - `vfs.min_batch_gap` <br>
    *    The minimum number of bytes between two VFS read batches.<br>
    *    **Default**: 500KB
+   * - `vfs.disable_batching` <br>
+   *    **Experimental** <br>
+   *    Disables tile batching from VFS, making direct reads.<br>
+   *    **Default**: false
    * - `vfs.file.posix_file_permissions` <br>
    *    permissions to use for posix file system with file or dir creation.<br>
    *    **Default**: 644
@@ -469,10 +498,6 @@ class Config {
    *    The maximum number of parallel operations on objects with `file:///`
    *    URIs. <br>
    *    **Default**: `sm.io_concurrency_level`
-   * - `vfs.file.enable_filelocks` <br>
-   *    If set to `false`, file locking operations are no-ops for `file:///`
-   *    URIs in VFS. <br>
-   *    **Default**: `true`
    * - `vfs.azure.storage_account_name` <br>
    *    Set the Azure Storage Account name. <br>
    *    **Default**: ""
@@ -668,6 +693,9 @@ class Config {
    *    "2": warn, "3": info "4": debug, "5": trace <br>
    *    **Default**: "1" if --enable-verbose bootstrap flag is provided,
    *    "0" otherwise <br>
+   * - `config.logging_format` <br>
+   *    The logging format configured (DEFAULT or JSON)
+   *    **Default**: "DEFAULT"
    * - `rest.server_address` <br>
    *    URL for REST server to use for remote arrays. <br>
    *    **Default**: "https://api.tiledb.com"
@@ -711,6 +739,30 @@ class Config {
    *    The delay factor to exponentially wait until further retries of a
    *    failed REST request <br>
    *    **Default**: 1.25
+   * - `rest.curl.verbose` <br>
+   *    Set curl to run in verbose mode for REST requests <br>
+   *    curl will print to stdout with this option
+   *    **Default**: false
+   * - `rest.load_metadata_on_array_open` <br>
+   *    If true, array metadata will be loaded and sent to server together with
+   *    the open array <br>
+   *    **Default**: true
+   * - `rest.load_non_empty_domain_on_array_open` <br>
+   *    If true, array non empty domain will be loaded and sent to server
+   *    together with the open array <br>
+   *    **Default**: true
+   * - `rest.use_refactored_array_open` <br>
+   *    If true, the new, experimental REST routes and APIs for opening an array
+   *    will be used <br>
+   *    **Default**: false
+   * - `rest.curl.buffer_size` <br>
+   *    Set curl buffer size for REST requests <br>
+   *    **Default**: 524288 (512KB)
+   * - `filestore.buffer_size` <br>
+   *    Specifies the size in bytes of the internal buffers used in the
+   *    filestore API. The size should be bigger than the minimum tile size
+   *    filestore currently supports, that is currently 1024bytes. <br>
+   *    **Default**: 100MB
    */
   Config& set(const std::string& param, const std::string& value) {
     tiledb_error_t* err;
@@ -735,6 +787,19 @@ class Config {
       throw TileDBError("Config Error: Invalid parameter '" + param + "'");
 
     return val;
+  }
+
+  /**
+   * Check if a configuration parameter exists.
+   * @param param Name of configuration parameter
+   * @return true if the parameter exists, false otherwise
+   */
+  bool contains(const std::string_view& param) const {
+    const char* val;
+    tiledb_error_t* err;
+    tiledb_config_get(config_.get(), param.data(), &val, &err);
+
+    return val != nullptr;
   }
 
   /**

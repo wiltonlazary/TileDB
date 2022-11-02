@@ -82,9 +82,23 @@ inline Status layout_enum(const std::string& layout_str, Layout* layout) {
   else if (layout_str == constants::hilbert_str)
     *layout = Layout::HILBERT;
   else {
-    return Status::Error("Invalid Layout " + layout_str);
+    return Status_Error("Invalid Layout " + layout_str);
   }
   return Status::Ok();
+}
+
+/* Throws error if tile order's enumeration is not 0 or 1. */
+inline void ensure_tile_order_is_valid(uint8_t layout_enum) {
+  if (layout_enum != 0 && layout_enum != 1)
+    throw std::runtime_error(
+        "[Tile order] Invalid Layout enum " + std::to_string(layout_enum));
+}
+
+/* Throws error if cell order's enumeration is greater than 4. */
+inline void ensure_cell_order_is_valid(uint8_t layout_enum) {
+  if (layout_enum > 4)
+    throw std::runtime_error(
+        "[Cell order] Invalid Layout enum " + std::to_string(layout_enum));
 }
 
 }  // namespace sm

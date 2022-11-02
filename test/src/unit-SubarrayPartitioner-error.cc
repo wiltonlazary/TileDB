@@ -30,8 +30,8 @@
  * Tests the `SubarrayPartitioner` class for errors.
  */
 
-#include "test/src/helpers.h"
-#include "test/src/vfs_helpers.h"
+#include "test/support/src/helpers.h"
+#include "test/support/src/vfs_helpers.h"
 #include "tiledb/sm/c_api/tiledb_struct_def.h"
 #include "tiledb/sm/subarray/subarray_partitioner.h"
 
@@ -41,7 +41,7 @@
 #include "tiledb/sm/filesystem/posix.h"
 #endif
 
-#include <catch.hpp>
+#include <test/support/tdb_catch.h>
 #include <iostream>
 
 using namespace tiledb::common;
@@ -129,8 +129,7 @@ TEST_CASE_METHOD(
   SubarrayRanges<uint64_t> ranges = {};
   Layout subarray_layout = Layout::GLOBAL_ORDER;
   create_subarray(array_->array_, ranges, subarray_layout, &subarray);
-  ThreadPool tp;
-  CHECK(tp.init(4).ok());
+  ThreadPool tp(4);
   Config config;
   SubarrayPartitioner subarray_partitioner(
       &config,
@@ -139,7 +138,8 @@ TEST_CASE_METHOD(
       memory_budget_var_,
       0,
       &tp,
-      &g_helper_stats);
+      &g_helper_stats,
+      g_helper_logger());
   uint64_t budget, budget_off, budget_val;
 
   auto st = subarray_partitioner.get_result_budget("a", &budget);

@@ -32,8 +32,9 @@
 
 #include "tiledb/sm/rest/curl.h"
 #include "tiledb/common/logger.h"
+#include "tiledb/sm/filesystem/uri.h"
 #include "tiledb/sm/global_state/global_state.h"
-#include "tiledb/sm/misc/uri.h"
+#include "tiledb/sm/misc/tdb_time.h"
 #include "tiledb/sm/misc/utils.h"
 #include "tiledb/sm/stats/global_stats.h"
 
@@ -249,12 +250,14 @@ size_t write_header_callback(
   return size * count;
 }
 
-Curl::Curl()
+Curl::Curl(const std::shared_ptr<Logger>& logger)
     : config_(nullptr)
     , curl_(nullptr, curl_easy_cleanup)
     , retry_count_(0)
     , retry_delay_factor_(0)
-    , retry_initial_delay_ms_(0) {
+    , retry_initial_delay_ms_(0)
+    , logger_(logger->clone("curl ", ++logger_id_))
+    , verbose_(false) {
 }
 
 Status Curl::init(
@@ -264,7 +267,7 @@ Status Curl::init(
     std::mutex* const res_mtx) {
   if (config == nullptr)
     return LOG_STATUS(
-        Status::RestError("Error initializing libcurl; config is null."));
+        Status_RestError("Error initializing libcurl; config is null."));
 
   config_ = config;
   curl_.reset(curl_easy_init());
@@ -275,7 +278,7 @@ Status Curl::init(
   // See https://curl.haxx.se/libcurl/c/threadsafe.html
   CURLcode rc = curl_easy_setopt(curl_.get(), CURLOPT_NOSIGNAL, 1);
   if (rc != CURLE_OK)
-    return LOG_STATUS(Status::RestError(
+    return LOG_STATUS(Status_RestError(
         "Error initializing libcurl; failed to set CURLOPT_NOSIGNAL"));
 
   // For human-readable error messages
@@ -284,30 +287,26 @@ Status Curl::init(
   rc = curl_easy_setopt(
       curl_.get(), CURLOPT_ERRORBUFFER, curl_error_buffer_.data());
   if (rc != CURLE_OK)
-    return LOG_STATUS(Status::RestError(
+    return LOG_STATUS(Status_RestError(
         "Error initializing libcurl; failed to set CURLOPT_ERRORBUFFER"));
 
   rc = curl_easy_setopt(
       curl_.get(), CURLOPT_HEADERFUNCTION, write_header_callback);
   if (rc != CURLE_OK)
-    return LOG_STATUS(Status::RestError(
+    return LOG_STATUS(Status_RestError(
         "Error initializing libcurl; failed to set CURLOPT_HEADERFUNCTION"));
 
   /* set url to fetch */
   rc = curl_easy_setopt(curl_.get(), CURLOPT_HEADERDATA, &headerData);
   if (rc != CURLE_OK)
-    return LOG_STATUS(Status::RestError(
+    return LOG_STATUS(Status_RestError(
         "Error initializing libcurl; failed to set CURLOPT_HEADERDATA"));
 
   // Ignore ssl validation if the user has set rest.ignore_ssl_validation = true
-  const char* ignore_ssl_validation_str = nullptr;
-  RETURN_NOT_OK(
-      config_->get("rest.ignore_ssl_validation", &ignore_ssl_validation_str));
-
   bool ignore_ssl_validation = false;
-  if (ignore_ssl_validation_str != nullptr)
-    RETURN_NOT_OK(tiledb::sm::utils::parse::convert(
-        ignore_ssl_validation_str, &ignore_ssl_validation));
+  bool found;
+  RETURN_NOT_OK(config_->get<bool>(
+      "rest.ignore_ssl_validation", &ignore_ssl_validation, &found));
 
   if (ignore_ssl_validation) {
     curl_easy_setopt(curl_.get(), CURLOPT_SSL_VERIFYHOST, 0);
@@ -326,7 +325,6 @@ Status Curl::init(
   }
 #endif
 
-  bool found;
   RETURN_NOT_OK(
       config_->get<uint64_t>("rest.retry_count", &retry_count_, &found));
   assert(found);
@@ -341,6 +339,13 @@ Status Curl::init(
 
   RETURN_NOT_OK(config_->get_vector<uint32_t>(
       "rest.retry_http_codes", &retry_http_codes_, &found));
+  assert(found);
+
+  RETURN_NOT_OK(config_->get<bool>("rest.curl.verbose", &verbose_, &found));
+  assert(found);
+
+  RETURN_NOT_OK(config_->get<uint64_t>(
+      "rest.curl.buffer_size", &curl_buffer_size_, &found));
   assert(found);
 
   return Status::Ok();
@@ -361,7 +366,7 @@ Status Curl::set_headers(struct curl_slist** headers) const {
   CURL* curl = curl_.get();
   if (curl == nullptr)
     return LOG_STATUS(
-        Status::RestError("Cannot set auth; curl instance is null."));
+        Status_RestError("Cannot set auth; curl instance is null."));
 
   const char* token = nullptr;
   RETURN_NOT_OK(config_->get("rest.token", &token));
@@ -370,7 +375,7 @@ Status Curl::set_headers(struct curl_slist** headers) const {
     *headers = curl_slist_append(
         *headers, (std::string("X-TILEDB-REST-API-Key: ") + token).c_str());
     if (*headers == nullptr)
-      return LOG_STATUS(Status::RestError(
+      return LOG_STATUS(Status_RestError(
           "Cannot set curl auth; curl_slist_append returned null."));
   } else {
     // Try username+password instead of token
@@ -382,8 +387,8 @@ Status Curl::set_headers(struct curl_slist** headers) const {
     // Check for no auth.
     if (username == nullptr || password == nullptr)
       return LOG_STATUS(
-          Status::RestError("Cannot set curl auth; either token or "
-                            "username/password must be set."));
+          Status_RestError("Cannot set curl auth; either token or "
+                           "username/password must be set."));
 
     std::string basic_auth = username + std::string(":") + password;
     curl_easy_setopt(curl, CURLOPT_HTTPAUTH, CURLAUTH_BASIC);
@@ -396,7 +401,7 @@ Status Curl::set_headers(struct curl_slist** headers) const {
     *headers = curl_slist_append(*headers, hdr.c_str());
     if (*headers == nullptr) {
       curl_slist_free_all(*headers);
-      return LOG_STATUS(Status::RestError(
+      return LOG_STATUS(Status_RestError(
           "Cannot set extra headers; curl_slist_append returned null."));
     }
   }
@@ -414,12 +419,12 @@ Status Curl::set_content_type(
       *headers = curl_slist_append(*headers, "Content-Type: application/capnp");
       break;
     default:
-      return LOG_STATUS(Status::RestError(
+      return LOG_STATUS(Status_RestError(
           "Cannot set content-type header; unknown serialization format."));
   }
 
   if (*headers == nullptr)
-    return LOG_STATUS(Status::RestError(
+    return LOG_STATUS(Status_RestError(
         "Cannot set content-type header; curl_slist_append returned null."));
 
   return Status::Ok();
@@ -451,6 +456,33 @@ Status Curl::make_curl_request(
       static_cast<void*>(&cb));
 }
 
+CURLcode Curl::curl_easy_perform_instrumented(
+    const char* const url, const uint8_t retry_number) const {
+  CURL* curl = curl_.get();
+  // Time the curl transfer
+  uint64_t t1 = tiledb::sm::utils::time::timestamp_now_ms();
+  auto curl_code = curl_easy_perform(curl);
+  uint64_t t2 = tiledb::sm::utils::time::timestamp_now_ms();
+  uint64_t dt = t2 - t1;
+  long http_code = 0;
+  if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code) != CURLE_OK) {
+    http_code = 999;
+  }
+
+  // Log time and details about the request
+  std::stringstream ss;
+  ss.precision(3);
+  ss.setf(std::ios::fixed, std::ios::floatfield);
+  ss << "OP=CORE-TO-REST";
+  ss << ",SECONDS=" << (float)dt / 1000.0;
+  ss << ",RETRY=" << int(retry_number);
+  ss << ",CODE=" << http_code;
+  ss << ",URL=" << url;
+  logger_->trace(ss);
+
+  return curl_code;
+}
+
 Status Curl::make_curl_request_common(
     stats::Stats* const stats,
     const char* const url,
@@ -460,7 +492,7 @@ Status Curl::make_curl_request_common(
   CURL* curl = curl_.get();
   if (curl == nullptr)
     return LOG_STATUS(
-        Status::RestError("Cannot make curl request; curl instance is null."));
+        Status_RestError("Cannot make curl request; curl instance is null."));
 
   *curl_code = CURLE_OK;
   uint64_t retry_delay = retry_initial_delay_ms_;
@@ -478,6 +510,9 @@ Status Curl::make_curl_request_common(
     /* pass fetch buffer pointer */
     curl_easy_setopt(
         curl, CURLOPT_WRITEDATA, static_cast<void*>(&write_cb_state));
+
+    /* Set curl verbose mode */
+    curl_easy_setopt(curl, CURLOPT_VERBOSE, verbose_);
 
     /* set default user agent */
     // curl_easy_setopt(curl, CURLOPT_USERAGENT, "libcurl-agent/1.0");
@@ -516,8 +551,11 @@ Status Curl::make_curl_request_common(
     /* enable forwarding auth to redirects */
     curl_easy_setopt(curl, CURLOPT_UNRESTRICTED_AUTH, 1L);
 
+    /* Set max buffer size */
+    curl_easy_setopt(curl, CURLOPT_BUFFERSIZE, curl_buffer_size_);
+
     /* fetch the url */
-    CURLcode tmp_curl_code = curl_easy_perform(curl);
+    CURLcode tmp_curl_code = curl_easy_perform_instrumented(url, i);
 
     bool retry;
     RETURN_NOT_OK(should_retry(&retry));
@@ -544,7 +582,7 @@ Status Curl::make_curl_request_common(
       long http_code = 0;
       if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code) !=
           CURLE_OK)
-        return LOG_STATUS(Status::RestError(
+        return LOG_STATUS(Status_RestError(
             "Error checking curl error; could not get HTTP code."));
 
       global_logger().debug(
@@ -574,11 +612,11 @@ Status Curl::should_retry(bool* retry) const {
   CURL* curl = curl_.get();
   if (curl == nullptr)
     return LOG_STATUS(
-        Status::RestError("Error checking curl error; curl instance is null."));
+        Status_RestError("Error checking curl error; curl instance is null."));
 
   long http_code = 0;
   if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code) != CURLE_OK)
-    return LOG_STATUS(Status::RestError(
+    return LOG_STATUS(Status_RestError(
         "Error checking curl error; could not get HTTP code."));
 
   // Check http code for list of retries
@@ -592,6 +630,22 @@ Status Curl::should_retry(bool* retry) const {
   return Status::Ok();
 }
 
+tuple<Status, optional<long>> Curl::last_http_status_code() {
+  CURL* curl = curl_.get();
+  if (curl == nullptr)
+    return {
+        Status_RestError("Error checking curl error; curl instance is null."),
+        std::nullopt};
+
+  long http_code = 0;
+  if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code) != CURLE_OK)
+    return {
+        Status_RestError("Error checking curl error; could not get HTTP code."),
+        std::nullopt};
+
+  return {Status::Ok(), http_code};
+}
+
 Status Curl::check_curl_errors(
     CURLcode curl_code,
     const std::string& operation,
@@ -599,11 +653,11 @@ Status Curl::check_curl_errors(
   CURL* curl = curl_.get();
   if (curl == nullptr)
     return LOG_STATUS(
-        Status::RestError("Error checking curl error; curl instance is null."));
+        Status_RestError("Error checking curl error; curl instance is null."));
 
   long http_code = 0;
   if (curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code) != CURLE_OK)
-    return LOG_STATUS(Status::RestError(
+    return LOG_STATUS(Status_RestError(
         "Error checking curl error; could not get HTTP code."));
 
   if (curl_code != CURLE_OK || http_code >= 400) {
@@ -624,7 +678,7 @@ Status Curl::check_curl_errors(
       }
     }
 
-    return LOG_STATUS(Status::RestError(msg.str()));
+    return Status_RestError(msg.str());
   }
 
   return Status::Ok();
@@ -698,13 +752,16 @@ Status Curl::post_data_common(
   CURL* curl = curl_.get();
   if (curl == nullptr)
     return LOG_STATUS(
-        Status::RestError("Error posting data; curl instance is null."));
+        Status_RestError("Error posting data; curl instance is null."));
 
   // TODO: If you post more than 2GB, use CURLOPT_POSTFIELDSIZE_LARGE.
   const uint64_t post_size_limit = uint64_t(2) * 1024 * 1024 * 1024;
-  if (data->total_size() > post_size_limit)
-    return LOG_STATUS(
-        Status::RestError("Error posting data; buffer size > 2GB"));
+  if (data->total_size() > post_size_limit) {
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, data->total_size());
+  } else {
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, data->total_size());
+  }
+  logger_->debug("posting {} bytes to", data->total_size());
 
   // Set auth and content-type for request
   *headers = nullptr;
@@ -718,7 +775,6 @@ Status Curl::post_data_common(
   curl_easy_setopt(
       curl, CURLOPT_READFUNCTION, buffer_list_read_memory_callback);
   curl_easy_setopt(curl, CURLOPT_READDATA, data);
-  curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, data->total_size());
 
   /* pass our list of custom made headers */
   curl_easy_setopt(curl, CURLOPT_HTTPHEADER, *headers);
@@ -739,7 +795,7 @@ Status Curl::get_data(
   CURL* curl = curl_.get();
   if (curl == nullptr)
     return LOG_STATUS(
-        Status::RestError("Error getting data; curl instance is null."));
+        Status_RestError("Error getting data; curl instance is null."));
 
   // Set auth and content-type for request
   struct curl_slist* headers = nullptr;
@@ -763,6 +819,45 @@ Status Curl::get_data(
   return Status::Ok();
 }
 
+Status Curl::options(
+    stats::Stats* const stats,
+    const std::string& url,
+    SerializationType serialization_type,
+    Buffer* returned_data,
+    const std::string& res_ns_uri) {
+  CURL* curl = curl_.get();
+  if (curl == nullptr)
+    return LOG_STATUS(
+        Status_RestError("Error getting data; curl instance is null."));
+
+  // Set auth and content-type for request
+  struct curl_slist* headers = nullptr;
+  RETURN_NOT_OK_ELSE(set_headers(&headers), curl_slist_free_all(headers));
+  RETURN_NOT_OK_ELSE(
+      set_content_type(serialization_type, &headers),
+      curl_slist_free_all(headers));
+
+  /* pass our list of custom made headers */
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+
+  /* HTTP OPTIONS please */
+  curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "OPTIONS");
+
+  /* HEAD */
+  curl_easy_setopt(curl, CURLOPT_NOBODY, 1);
+
+  CURLcode ret;
+  headerData.uri = &res_ns_uri;
+  auto st = make_curl_request(stats, url.c_str(), &ret, returned_data);
+  curl_slist_free_all(headers);
+  RETURN_NOT_OK(st);
+
+  // Check for errors
+  RETURN_NOT_OK(check_curl_errors(ret, "OPTIONS", returned_data));
+
+  return Status::Ok();
+}
+
 Status Curl::delete_data(
     stats::Stats* const stats,
     const std::string& url,
@@ -772,7 +867,7 @@ Status Curl::delete_data(
   CURL* curl = curl_.get();
   if (curl == nullptr)
     return LOG_STATUS(
-        Status::RestError("Error deleting data; curl instance is null."));
+        Status_RestError("Error deleting data; curl instance is null."));
 
   // Set auth and content-type for request
   struct curl_slist* headers = nullptr;
@@ -803,5 +898,134 @@ Status Curl::delete_data(
   return Status::Ok();
 }
 
+Status Curl::patch_data(
+    stats::Stats* const stats,
+    const std::string& url,
+    const SerializationType serialization_type,
+    const BufferList* data,
+    Buffer* const returned_data,
+    const std::string& res_uri) {
+  struct curl_slist* headers;
+  RETURN_NOT_OK(patch_data_common(serialization_type, data, &headers));
+
+  CURLcode ret;
+  headerData.uri = &res_uri;
+  auto st = make_curl_request(stats, url.c_str(), &ret, returned_data);
+  curl_slist_free_all(headers);
+  RETURN_NOT_OK(st);
+
+  // Check for errors
+  RETURN_NOT_OK(check_curl_errors(ret, "PATCH", returned_data));
+
+  return Status::Ok();
+}
+
+Status Curl::patch_data_common(
+    const SerializationType serialization_type,
+    const BufferList* data,
+    struct curl_slist** headers) {
+  CURL* curl = curl_.get();
+  if (curl == nullptr)
+    return LOG_STATUS(
+        Status_RestError("Error patching data; curl instance is null."));
+
+  const uint64_t post_size_limit = uint64_t(2) * 1024 * 1024 * 1024;
+  logger_->debug("patching {} bytes to", data->total_size());
+  if (data->total_size() > post_size_limit) {
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, data->total_size());
+  } else {
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, data->total_size());
+  }
+
+  // Set auth and content-type for request
+  *headers = nullptr;
+  RETURN_NOT_OK_ELSE(set_headers(headers), curl_slist_free_all(*headers));
+  RETURN_NOT_OK_ELSE(
+      set_content_type(serialization_type, headers),
+      curl_slist_free_all(*headers));
+
+  /* Set POST so curl sends the body */
+  curl_easy_setopt(curl, CURLOPT_POST, 1);
+
+  /* HTTP PATCH please */
+  curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PATCH");
+  curl_easy_setopt(
+      curl, CURLOPT_READFUNCTION, buffer_list_read_memory_callback);
+  curl_easy_setopt(curl, CURLOPT_READDATA, data);
+
+  /* pass our list of custom made headers */
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, *headers);
+
+  /* set seek for handling redirects */
+  curl_easy_setopt(curl, CURLOPT_SEEKFUNCTION, &buffer_list_seek_callback);
+  curl_easy_setopt(curl, CURLOPT_SEEKDATA, data);
+
+  return Status::Ok();
+}
+
+Status Curl::put_data(
+    stats::Stats* const stats,
+    const std::string& url,
+    const SerializationType serialization_type,
+    const BufferList* data,
+    Buffer* const returned_data,
+    const std::string& res_uri) {
+  struct curl_slist* headers;
+  RETURN_NOT_OK(put_data_common(serialization_type, data, &headers));
+
+  CURLcode ret;
+  headerData.uri = &res_uri;
+  auto st = make_curl_request(stats, url.c_str(), &ret, returned_data);
+  curl_slist_free_all(headers);
+  RETURN_NOT_OK(st);
+
+  // Check for errors
+  RETURN_NOT_OK(check_curl_errors(ret, "PUT", returned_data));
+
+  return Status::Ok();
+}
+
+Status Curl::put_data_common(
+    const SerializationType serialization_type,
+    const BufferList* data,
+    struct curl_slist** headers) {
+  CURL* curl = curl_.get();
+  if (curl == nullptr)
+    return LOG_STATUS(
+        Status_RestError("Error putting data; curl instance is null."));
+
+  const uint64_t post_size_limit = uint64_t(2) * 1024 * 1024 * 1024;
+  logger_->debug("putting {} bytes to", data->total_size());
+  if (data->total_size() > post_size_limit) {
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, data->total_size());
+  } else {
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, data->total_size());
+  }
+
+  // Set auth and content-type for request
+  *headers = nullptr;
+  RETURN_NOT_OK_ELSE(set_headers(headers), curl_slist_free_all(*headers));
+  RETURN_NOT_OK_ELSE(
+      set_content_type(serialization_type, headers),
+      curl_slist_free_all(*headers));
+
+  /* Set POST so curl sends the body */
+  curl_easy_setopt(curl, CURLOPT_POST, 1);
+
+  /* HTTP PUT please */
+  curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
+  curl_easy_setopt(
+      curl, CURLOPT_READFUNCTION, buffer_list_read_memory_callback);
+  curl_easy_setopt(curl, CURLOPT_READDATA, data);
+
+  /* pass our list of custom made headers */
+  curl_easy_setopt(curl, CURLOPT_HTTPHEADER, *headers);
+
+  /* set seek for handling redirects */
+  curl_easy_setopt(curl, CURLOPT_SEEKFUNCTION, &buffer_list_seek_callback);
+  curl_easy_setopt(curl, CURLOPT_SEEKDATA, data);
+
+  return Status::Ok();
+}
 }  // namespace sm
 }  // namespace tiledb

@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2018-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2018-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -33,7 +33,12 @@
 // clang-format off
 #ifdef TILEDB_SERIALIZATION
 #include "tiledb/sm/serialization/capnp_utils.h"
+#include "tiledb/sm/serialization/array.h"
 #include "tiledb/sm/serialization/array_schema_evolution.h"
+#include "tiledb/sm/serialization/array.h"
+#include "tiledb/sm/serialization/config.h"
+#include "tiledb/sm/serialization/fragment_info.h"
+#include "tiledb/sm/serialization/group.h"
 #include "tiledb/sm/serialization/query.h"
 #include "tiledb/sm/serialization/tiledb-rest.h"
 #include "tiledb/sm/rest/curl.h" // must be included last to avoid Windows.h
@@ -49,10 +54,13 @@
 
 #include "tiledb/common/logger.h"
 #include "tiledb/sm/array/array.h"
+#include "tiledb/sm/group/group.h"
 #include "tiledb/sm/enums/query_type.h"
 #include "tiledb/sm/misc/constants.h"
-#include "tiledb/sm/misc/utils.h"
+#include "tiledb/sm/misc/endian.h"
+#include "tiledb/sm/misc/parse_argument.h"
 #include "tiledb/sm/query/query.h"
+#include "tiledb/sm/query/query_buffer.h"
 #include "tiledb/sm/rest/rest_client.h"
 #include "tiledb/sm/serialization/array_schema.h"
 
@@ -77,12 +85,15 @@ RestClient::RestClient()
 Status RestClient::init(
     stats::Stats* const parent_stats,
     const Config* config,
-    ThreadPool* compute_tp) {
+    ThreadPool* compute_tp,
+    const std::shared_ptr<Logger>& logger) {
   if (config == nullptr)
     return LOG_STATUS(
-        Status::RestError("Error initializing rest client; config is null."));
+        Status_RestError("Error initializing rest client; config is null."));
 
   stats_ = parent_stats->create_child("RestClient");
+
+  logger_ = logger->clone("curl ", ++logger_id_);
 
   config_ = config;
   compute_tp_ = compute_tp;
@@ -92,16 +103,16 @@ Status RestClient::init(
   if (c_str != nullptr)
     rest_server_ = std::string(c_str);
   if (rest_server_.empty())
-    return LOG_STATUS(Status::RestError(
+    return LOG_STATUS(Status_RestError(
         "Error initializing rest client; server address is empty."));
 
   RETURN_NOT_OK(config_->get("rest.server_serialization_format", &c_str));
   if (c_str != nullptr)
     RETURN_NOT_OK(serialization_type_enum(c_str, &serialization_type_));
 
-  RETURN_NOT_OK(config_->get("rest.resubmit_incomplete", &c_str));
-  if (c_str != nullptr)
-    RETURN_NOT_OK(utils::parse::convert(c_str, &resubmit_incomplete_));
+  bool found;
+  RETURN_NOT_OK(config_->get<bool>(
+      "rest.resubmit_incomplete", &resubmit_incomplete_, &found));
 
   return Status::Ok();
 }
@@ -112,32 +123,117 @@ Status RestClient::set_header(
   return Status::Ok();
 }
 
-Status RestClient::get_array_schema_from_rest(
-    const URI& uri, ArraySchema** array_schema) {
+tuple<Status, std::optional<bool>> RestClient::check_array_exists_from_rest(
+    const URI& uri) {
   // Init curl and form the URL
-  Curl curlc;
+  Curl curlc(logger_);
   std::string array_ns, array_uri;
-  RETURN_NOT_OK(uri.get_rest_components(&array_ns, &array_uri));
+  RETURN_NOT_OK_TUPLE(uri.get_rest_components(&array_ns, &array_uri), nullopt);
   const std::string cache_key = array_ns + ":" + array_uri;
-  RETURN_NOT_OK(
-      curlc.init(config_, extra_headers_, &redirect_meta_, &redirect_mtx_));
+  RETURN_NOT_OK_TUPLE(
+      curlc.init(config_, extra_headers_, &redirect_meta_, &redirect_mtx_),
+      nullopt);
+  const std::string url = redirect_uri(cache_key) + "/v1/arrays/" + array_ns +
+                          "/" + curlc.url_escape(array_uri);
+
+  // Make the request, the return data is ignored
+  Buffer returned_data;
+  auto curl_st = curlc.get_data(
+      stats_, url, serialization_type_, &returned_data, cache_key);
+
+  auto&& [status_st, http_status_code] = curlc.last_http_status_code();
+  RETURN_NOT_OK_TUPLE(status_st, std::nullopt);
+  // First check for 404's which indicate does not exist
+  if (http_status_code == 404) {
+    return {Status::Ok(), false};
+  }
+
+  // Next handle any errors. This is second because a 404 produces a status
+  RETURN_NOT_OK_TUPLE(curl_st, std::nullopt);
+
+  // 200 http responses yield the array exists and user has permissions
+  if (http_status_code == 200) {
+    return {Status::Ok(), true};
+  }
+
+  // Default fall back, indicate it does not exist
+  return {Status::Ok(), false};
+}
+
+tuple<Status, std::optional<bool>> RestClient::check_group_exists_from_rest(
+    const URI& uri) {
+  // Init curl and form the URL
+  Curl curlc(logger_);
+  std::string group_ns, group_uri;
+  RETURN_NOT_OK_TUPLE(uri.get_rest_components(&group_ns, &group_uri), nullopt);
+  const std::string cache_key = group_ns + ":" + group_uri;
+  RETURN_NOT_OK_TUPLE(
+      curlc.init(config_, extra_headers_, &redirect_meta_, &redirect_mtx_),
+      nullopt);
+  const std::string url = redirect_uri(cache_key) + "/v2/groups/" + group_ns +
+                          "/" + curlc.url_escape(group_uri);
+
+  // Make the request, the returned data is ignored for now.
+  Buffer returned_data;
+  auto curl_st = curlc.options(
+      stats_, url, serialization_type_, &returned_data, cache_key);
+
+  auto&& [status_st, http_status_code] = curlc.last_http_status_code();
+  RETURN_NOT_OK_TUPLE(status_st, std::nullopt);
+  // First check for 404's which indicate does not exist
+  if (http_status_code == 404) {
+    return {Status::Ok(), false};
+  }
+
+  // Next handle any errors. This is second because a 404 produces a status
+  RETURN_NOT_OK_TUPLE(curl_st, std::nullopt);
+
+  // 200 http responses yield the group exists and user has permissions
+  if (http_status_code == 200) {
+    return {Status::Ok(), true};
+  }
+
+  // Default fall back, indicate it does not exist
+  return {Status::Ok(), false};
+}
+
+tuple<Status, optional<shared_ptr<ArraySchema>>>
+RestClient::get_array_schema_from_rest(const URI& uri) {
+  // Init curl and form the URL
+  Curl curlc(logger_);
+  std::string array_ns, array_uri;
+  RETURN_NOT_OK_TUPLE(uri.get_rest_components(&array_ns, &array_uri), nullopt);
+  const std::string cache_key = array_ns + ":" + array_uri;
+  RETURN_NOT_OK_TUPLE(
+      curlc.init(config_, extra_headers_, &redirect_meta_, &redirect_mtx_),
+      nullopt);
   const std::string url = redirect_uri(cache_key) + "/v1/arrays/" + array_ns +
                           "/" + curlc.url_escape(array_uri);
 
   // Get the data
   Buffer returned_data;
-  RETURN_NOT_OK(curlc.get_data(
-      stats_, url, serialization_type_, &returned_data, cache_key));
+  RETURN_NOT_OK_TUPLE(
+      curlc.get_data(
+          stats_, url, serialization_type_, &returned_data, cache_key),
+      nullopt);
   if (returned_data.data() == nullptr || returned_data.size() == 0)
-    return LOG_STATUS(Status::RestError(
-        "Error getting array schema from REST; server returned no data."));
+    return {
+        LOG_STATUS(Status_RestError(
+            "Error getting array schema from REST; server returned no data.")),
+        nullopt};
 
-  return serialization::array_schema_deserialize(
-      array_schema, serialization_type_, returned_data);
+  // Ensure data has a null delimiter for cap'n proto if using JSON
+  RETURN_NOT_OK_TUPLE(
+      ensure_json_null_delimited_string(&returned_data), nullopt);
+  return {Status::Ok(),
+          make_shared<ArraySchema>(
+              HERE(),
+              serialization::array_schema_deserialize(
+                  serialization_type_, returned_data))};
 }
 
 Status RestClient::post_array_schema_to_rest(
-    const URI& uri, ArraySchema* array_schema) {
+    const URI& uri, const ArraySchema& array_schema) {
   Buffer buff;
   RETURN_NOT_OK(serialization::array_schema_serialize(
       array_schema, serialization_type_, &buff, false));
@@ -154,7 +250,7 @@ Status RestClient::post_array_schema_to_rest(
         creation_access_credentials_name));
 
   // Init curl and form the URL
-  Curl curlc;
+  Curl curlc(logger_);
   std::string array_ns, array_uri;
   RETURN_NOT_OK(uri.get_rest_components(&array_ns, &array_uri));
   const std::string cache_key = array_ns + ":" + array_uri;
@@ -173,9 +269,72 @@ Status RestClient::post_array_schema_to_rest(
   return sc;
 }
 
+Status RestClient::post_array_from_rest(const URI& uri, Array* array) {
+  if (array == nullptr) {
+    return LOG_STATUS(Status_SerializationError(
+        "Error getting remote array; array is null."));
+  }
+
+  Buffer buff;
+  RETURN_NOT_OK(
+      serialization::array_open_serialize(*array, serialization_type_, &buff));
+  // Wrap in a list
+  BufferList serialized;
+  RETURN_NOT_OK(serialized.add_buffer(std::move(buff)));
+
+  // Init curl and form the URL
+  Curl curlc(logger_);
+  std::string array_ns, array_uri;
+  RETURN_NOT_OK(uri.get_rest_components(&array_ns, &array_uri));
+  const std::string cache_key = array_ns + ":" + array_uri;
+  RETURN_NOT_OK(
+      curlc.init(config_, extra_headers_, &redirect_meta_, &redirect_mtx_));
+  std::string url = redirect_uri(cache_key) + "/v2/arrays/" + array_ns + "/" +
+                    curlc.url_escape(array_uri) + "/?";
+
+  // Remote array operations should provide start and end timestamps
+  url += "start_timestamp=" + std::to_string(array->timestamp_start()) +
+         "&end_timestamp=" + std::to_string(array->timestamp_end());
+
+  // Get the data
+  Buffer returned_data;
+  RETURN_NOT_OK(curlc.post_data(
+      stats_,
+      url,
+      serialization_type_,
+      &serialized,
+      &returned_data,
+      cache_key));
+  if (returned_data.data() == nullptr || returned_data.size() == 0)
+    return LOG_STATUS(Status_RestError(
+        "Error getting array from REST; server returned no data."));
+
+  // Ensure data has a null delimiter for cap'n proto if using JSON
+  RETURN_NOT_OK(ensure_json_null_delimited_string(&returned_data));
+  return serialization::array_deserialize(
+      array, serialization_type_, returned_data);
+}
+
+void RestClient::delete_array_from_rest(const URI& uri) {
+  /* #TODO Implement API endpoint on TileDBCloud. */
+  // Init curl and form the URL
+  Curl curlc(logger_);
+  std::string array_ns, array_uri;
+  throw_if_not_ok(uri.get_rest_components(&array_ns, &array_uri));
+  const std::string cache_key = array_ns + ":" + array_uri;
+  throw_if_not_ok(
+      curlc.init(config_, extra_headers_, &redirect_meta_, &redirect_mtx_));
+  const std::string url = redirect_uri(cache_key) + "/v1/arrays/" + array_ns +
+                          "/" + curlc.url_escape(array_uri);
+
+  Buffer returned_data;
+  throw_if_not_ok(curlc.delete_data(
+      stats_, url, serialization_type_, &returned_data, cache_key));
+}
+
 Status RestClient::deregister_array_from_rest(const URI& uri) {
   // Init curl and form the URL
-  Curl curlc;
+  Curl curlc(logger_);
   std::string array_ns, array_uri;
   RETURN_NOT_OK(uri.get_rest_components(&array_ns, &array_uri));
   const std::string cache_key = array_ns + ":" + array_uri;
@@ -193,13 +352,13 @@ Status RestClient::get_array_non_empty_domain(
     Array* array, uint64_t timestamp_start, uint64_t timestamp_end) {
   if (array == nullptr)
     return LOG_STATUS(
-        Status::RestError("Cannot get array non-empty domain; array is null"));
+        Status_RestError("Cannot get array non-empty domain; array is null"));
   if (array->array_uri().to_string().empty())
-    return LOG_STATUS(Status::RestError(
+    return LOG_STATUS(Status_RestError(
         "Cannot get array non-empty domain; array URI is empty"));
 
   // Init curl and form the URL
-  Curl curlc;
+  Curl curlc(logger_);
   std::string array_ns, array_uri;
   RETURN_NOT_OK(array->array_uri().get_rest_components(&array_ns, &array_uri));
   const std::string cache_key = array_ns + ":" + array_uri;
@@ -218,8 +377,11 @@ Status RestClient::get_array_non_empty_domain(
 
   if (returned_data.data() == nullptr || returned_data.size() == 0)
     return LOG_STATUS(
-        Status::RestError("Error getting array non-empty domain "
-                          "from REST; server returned no data."));
+        Status_RestError("Error getting array non-empty domain "
+                         "from REST; server returned no data."));
+
+  // Ensure data has a null delimiter for cap'n proto if using JSON
+  RETURN_NOT_OK(ensure_json_null_delimited_string(&returned_data));
 
   // Deserialize data returned
   return serialization::nonempty_domain_deserialize(
@@ -228,7 +390,7 @@ Status RestClient::get_array_non_empty_domain(
 
 Status RestClient::get_array_max_buffer_sizes(
     const URI& uri,
-    const ArraySchema* schema,
+    const ArraySchema& schema,
     const void* subarray,
     std::unordered_map<std::string, std::pair<uint64_t, uint64_t>>*
         buffer_sizes) {
@@ -239,7 +401,7 @@ Status RestClient::get_array_max_buffer_sizes(
       subarray_str.empty() ? "" : ("?subarray=" + subarray_str);
 
   // Init curl and form the URL
-  Curl curlc;
+  Curl curlc(logger_);
   std::string array_ns, array_uri;
   RETURN_NOT_OK(uri.get_rest_components(&array_ns, &array_uri));
   const std::string cache_key = array_ns + ":" + array_uri;
@@ -256,8 +418,11 @@ Status RestClient::get_array_max_buffer_sizes(
 
   if (returned_data.data() == nullptr || returned_data.size() == 0)
     return LOG_STATUS(
-        Status::RestError("Error getting array max buffer sizes "
-                          "from REST; server returned no data."));
+        Status_RestError("Error getting array max buffer sizes "
+                         "from REST; server returned no data."));
+
+  // Ensure data has a null delimiter for cap'n proto if using JSON
+  RETURN_NOT_OK(ensure_json_null_delimited_string(&returned_data));
 
   // Deserialize data returned
   return serialization::max_buffer_sizes_deserialize(
@@ -270,11 +435,11 @@ Status RestClient::get_array_metadata_from_rest(
     uint64_t timestamp_end,
     Array* array) {
   if (array == nullptr)
-    return LOG_STATUS(Status::RestError(
+    return LOG_STATUS(Status_RestError(
         "Error getting array metadata from REST; array is null."));
 
   // Init curl and form the URL
-  Curl curlc;
+  Curl curlc(logger_);
   std::string array_ns, array_uri;
   RETURN_NOT_OK(uri.get_rest_components(&array_ns, &array_uri));
   const std::string cache_key = array_ns + ":" + array_uri;
@@ -291,34 +456,43 @@ Status RestClient::get_array_metadata_from_rest(
   RETURN_NOT_OK(curlc.get_data(
       stats_, url, serialization_type_, &returned_data, cache_key));
   if (returned_data.data() == nullptr || returned_data.size() == 0)
-    return LOG_STATUS(Status::RestError(
+    return LOG_STATUS(Status_RestError(
         "Error getting array metadata from REST; server returned no data."));
 
-  return serialization::array_metadata_deserialize(
-      array, serialization_type_, returned_data);
+  // Ensure data has a null delimiter for cap'n proto if using JSON
+  RETURN_NOT_OK(ensure_json_null_delimited_string(&returned_data));
+  return serialization::metadata_deserialize(
+      array->unsafe_metadata(), serialization_type_, returned_data);
 }
 
-Status RestClient::post_array_metadata_to_rest(const URI& uri, Array* array) {
+Status RestClient::post_array_metadata_to_rest(
+    const URI& uri,
+    uint64_t timestamp_start,
+    uint64_t timestamp_end,
+    Array* array) {
   if (array == nullptr)
-    return LOG_STATUS(Status::RestError(
+    return LOG_STATUS(Status_RestError(
         "Error posting array metadata to REST; array is null."));
 
   Buffer buff;
-  RETURN_NOT_OK(serialization::array_metadata_serialize(
-      array, serialization_type_, &buff));
+  RETURN_NOT_OK(serialization::metadata_serialize(
+      array->unsafe_metadata(), serialization_type_, &buff));
   // Wrap in a list
   BufferList serialized;
   RETURN_NOT_OK(serialized.add_buffer(std::move(buff)));
 
   // Init curl and form the URL
-  Curl curlc;
+  Curl curlc(logger_);
   std::string array_ns, array_uri;
   RETURN_NOT_OK(uri.get_rest_components(&array_ns, &array_uri));
   const std::string cache_key = array_ns + ":" + array_uri;
   RETURN_NOT_OK(
       curlc.init(config_, extra_headers_, &redirect_meta_, &redirect_mtx_));
   const std::string url = redirect_uri(cache_key) + "/v1/arrays/" + array_ns +
-                          "/" + curlc.url_escape(array_uri) + "/array_metadata";
+                          "/" + curlc.url_escape(array_uri) +
+                          "/array_metadata?" +
+                          "start_timestamp=" + std::to_string(timestamp_start) +
+                          "&end_timestamp=" + std::to_string(timestamp_end);
 
   // Put the data
   Buffer returned_data;
@@ -347,7 +521,15 @@ Status RestClient::post_query_submit(
   const Array* array = query->array();
   if (array == nullptr) {
     return LOG_STATUS(
-        Status::RestError("Error submitting query to REST; null array."));
+        Status_RestError("Error submitting query to REST; null array."));
+  }
+
+  auto rest_scratch = query->rest_scratch();
+
+  if (rest_scratch->size() > 0) {
+    bool skip;
+    query_post_call_back(
+        false, nullptr, 0, &skip, rest_scratch, query, copy_state);
   }
 
   // Serialize query to send
@@ -356,7 +538,7 @@ Status RestClient::post_query_submit(
       query, serialization_type_, true, &serialized));
 
   // Init curl and form the URL
-  Curl curlc;
+  Curl curlc(logger_);
   std::string array_ns, array_uri;
   RETURN_NOT_OK(uri.get_rest_components(&array_ns, &array_uri));
   const std::string cache_key = array_ns + ":" + array_uri;
@@ -373,15 +555,14 @@ Status RestClient::post_query_submit(
 
   // Create the callback that will process the response buffers as they
   // are received.
-  Buffer scratch;
   auto write_cb = std::bind(
-      &RestClient::post_data_write_cb,
+      &RestClient::query_post_call_back,
       this,
       std::placeholders::_1,
       std::placeholders::_2,
       std::placeholders::_3,
       std::placeholders::_4,
-      &scratch,
+      rest_scratch,
       query,
       copy_state);
 
@@ -390,12 +571,12 @@ Status RestClient::post_query_submit(
       url,
       serialization_type_,
       &serialized,
-      &scratch,
+      rest_scratch.get(),
       std::move(write_cb),
       cache_key);
 
   if (!st.ok() && copy_state->empty()) {
-    return LOG_STATUS(Status::RestError(
+    return LOG_STATUS(Status_RestError(
         "Error submitting query to REST; "
         "server returned no data. "
         "Curl error: " +
@@ -405,12 +586,12 @@ Status RestClient::post_query_submit(
   return st;
 }
 
-size_t RestClient::post_data_write_cb(
+size_t RestClient::query_post_call_back(
     const bool reset,
     void* const contents,
     const size_t content_nbytes,
     bool* const skip_retries,
-    Buffer* const scratch,
+    shared_ptr<Buffer> scratch,
     Query* query,
     serialization::CopyState* copy_state) {
   // All return statements in this function must pass through this wrapper.
@@ -501,7 +682,6 @@ size_t RestClient::post_data_write_cb(
       st = aux.write(scratch->cur_data(), query_size);
       if (!st.ok()) {
         scratch->set_offset(scratch->offset() - 8);
-        scratch->set_size(scratch->offset());
         return return_wrapper(bytes_processed);
       }
 
@@ -514,7 +694,6 @@ size_t RestClient::post_data_write_cb(
           aux, serialization_type_, true, copy_state, query, compute_tp_);
       if (!st.ok()) {
         scratch->set_offset(scratch->offset() - 8);
-        scratch->set_size(scratch->offset());
         return return_wrapper(bytes_processed);
       }
     } else {
@@ -526,7 +705,6 @@ size_t RestClient::post_data_write_cb(
           *scratch, serialization_type_, true, copy_state, query, compute_tp_);
       if (!st.ok()) {
         scratch->set_offset(scratch->offset() - 8);
-        scratch->set_size(scratch->offset());
         return return_wrapper(bytes_processed);
       }
     }
@@ -567,7 +745,7 @@ size_t RestClient::post_data_write_cb(
 
     assert(st.ok());
     if (!st.ok()) {
-      LOG_STATUS(st);
+      LOG_STATUS_NO_RETURN_VALUE(st);
     }
     assert(scratch->size() == length);
   }
@@ -585,7 +763,7 @@ Status RestClient::finalize_query_to_rest(const URI& uri, Query* query) {
       query, serialization_type_, true, &serialized));
 
   // Init curl and form the URL
-  Curl curlc;
+  Curl curlc(logger_);
   std::string array_ns, array_uri;
   RETURN_NOT_OK(uri.get_rest_components(&array_ns, &array_uri));
   const std::string cache_key = array_ns + ":" + array_uri;
@@ -604,9 +782,10 @@ Status RestClient::finalize_query_to_rest(const URI& uri, Query* query) {
       &returned_data,
       cache_key));
 
-  if (returned_data.data() == nullptr || returned_data.size() == 0)
+  if (returned_data.data() == nullptr || returned_data.size() == 0) {
     return LOG_STATUS(
-        Status::RestError("Error finalizing query; server returned no data."));
+        Status_RestError("Error finalizing query; server returned no data."));
+  }
 
   // Deserialize data returned
   returned_data.reset_offset();
@@ -614,12 +793,73 @@ Status RestClient::finalize_query_to_rest(const URI& uri, Query* query) {
       returned_data, serialization_type_, true, nullptr, query, compute_tp_);
 }
 
+Status RestClient::submit_and_finalize_query_to_rest(
+    const URI& uri, Query* query) {
+  serialization::CopyState copy_state;
+
+  // Get array
+  const Array* array = query->array();
+  if (array == nullptr) {
+    return LOG_STATUS(Status_RestError(
+        "Error while submit_and_finalize query to REST; null array."));
+  }
+
+  auto rest_scratch = query->rest_scratch();
+
+  // Serialize query to send
+  BufferList serialized;
+  RETURN_NOT_OK(serialization::query_serialize(
+      query, serialization_type_, true, &serialized));
+
+  // Init curl and form the URL
+  Curl curlc(logger_);
+  std::string array_ns, array_uri;
+  RETURN_NOT_OK(uri.get_rest_components(&array_ns, &array_uri));
+  const std::string cache_key = array_ns + ":" + array_uri;
+  RETURN_NOT_OK(
+      curlc.init(config_, extra_headers_, &redirect_meta_, &redirect_mtx_));
+  std::string url =
+      redirect_uri(cache_key) + "/v2/arrays/" + array_ns + "/" +
+      curlc.url_escape(array_uri) +
+      "/query/submit_and_finalize?type=" + query_type_str(query->type());
+
+  auto write_cb = std::bind(
+      &RestClient::query_post_call_back,
+      this,
+      std::placeholders::_1,
+      std::placeholders::_2,
+      std::placeholders::_3,
+      std::placeholders::_4,
+      rest_scratch,
+      query,
+      &copy_state);
+
+  const Status st = curlc.post_data(
+      stats_,
+      url,
+      serialization_type_,
+      &serialized,
+      rest_scratch.get(),
+      std::move(write_cb),
+      cache_key);
+
+  if (!st.ok() && copy_state.empty()) {
+    return LOG_STATUS(Status_RestError(
+        "Error while submit_and_finalize query to REST; "
+        "server returned no data. "
+        "Curl error: " +
+        st.message()));
+  }
+
+  return st;
+}
+
 Status RestClient::subarray_to_str(
-    const ArraySchema* schema,
+    const ArraySchema& schema,
     const void* subarray,
     std::string* subarray_str) {
-  const auto coords_type = schema->dimension(0)->type();
-  const auto dim_num = schema->dim_num();
+  const auto coords_type{schema.dimension_ptr(0)->type()};
+  const auto dim_num = schema.dim_num();
   const auto subarray_nelts = 2 * dim_num;
 
   if (subarray == nullptr) {
@@ -683,7 +923,7 @@ Status RestClient::subarray_to_str(
         ss << ((const double*)subarray)[i];
         break;
       default:
-        return LOG_STATUS(Status::RestError(
+        return LOG_STATUS(Status_RestError(
             "Error converting subarray to string; unhandled datatype."));
     }
 
@@ -699,8 +939,9 @@ Status RestClient::subarray_to_str(
 Status RestClient::update_attribute_buffer_sizes(
     const serialization::CopyState& copy_state, Query* query) const {
   // Applicable only to reads
-  if (query->type() != QueryType::READ)
+  if (query->type() != QueryType::READ) {
     return Status::Ok();
+  }
 
   for (const auto& cit : copy_state) {
     const auto& name = cit.first;
@@ -711,20 +952,26 @@ Status RestClient::update_attribute_buffer_sizes(
       *query_buffer.buffer_size_ = state.offset_size;
     } else if (query_buffer.buffer_size_ != nullptr)
       *query_buffer.buffer_size_ = state.data_size;
+
+    bool nullable = query->array_schema().is_nullable(name);
+    if (nullable && query_buffer.validity_vector_.buffer_size()) {
+      *query_buffer.validity_vector_.buffer_size() = state.validity_size;
+    }
   }
 
   return Status::Ok();
 }
 
 Status RestClient::get_query_est_result_sizes(const URI& uri, Query* query) {
-  if (query == nullptr)
-    return LOG_STATUS(Status::RestError(
+  if (query == nullptr) {
+    return LOG_STATUS(Status_RestError(
         "Error getting query estimated result size from REST; Query is null."));
+  }
 
   // Get array
   const Array* array = query->array();
   if (array == nullptr) {
-    return LOG_STATUS(Status::RestError(
+    return LOG_STATUS(Status_RestError(
         "Error festing query estimated result size from REST; null array."));
   }
 
@@ -734,7 +981,7 @@ Status RestClient::get_query_est_result_sizes(const URI& uri, Query* query) {
       query, serialization_type_, true, &serialized));
 
   // Init curl and form the URL
-  Curl curlc;
+  Curl curlc(logger_);
   std::string array_ns, array_uri;
   RETURN_NOT_OK(uri.get_rest_components(&array_ns, &array_uri));
   const std::string cache_key = array_ns + ":" + array_uri;
@@ -760,10 +1007,13 @@ Status RestClient::get_query_est_result_sizes(const URI& uri, Query* query) {
       &serialized,
       &returned_data,
       cache_key));
-  if (returned_data.data() == nullptr || returned_data.size() == 0)
-    return LOG_STATUS(Status::RestError(
+  if (returned_data.data() == nullptr || returned_data.size() == 0) {
+    return LOG_STATUS(Status_RestError(
         "Error getting array metadata from REST; server returned no data."));
+  }
 
+  // Ensure data has a null delimiter for cap'n proto if using JSON
+  RETURN_NOT_OK(ensure_json_null_delimited_string(&returned_data));
   return serialization::query_est_result_size_deserialize(
       query, serialization_type_, true, returned_data);
 }
@@ -786,7 +1036,7 @@ Status RestClient::post_array_schema_evolution_to_rest(
   RETURN_NOT_OK(serialized.add_buffer(std::move(buff)));
 
   // Init curl and form the URL
-  Curl curlc;
+  Curl curlc(logger_);
   std::string array_ns, array_uri;
   RETURN_NOT_OK(uri.get_rest_components(&array_ns, &array_uri));
   const std::string cache_key = array_ns + ":" + array_uri;
@@ -805,6 +1055,229 @@ Status RestClient::post_array_schema_evolution_to_rest(
   return sc;
 }
 
+Status RestClient::post_fragment_info_from_rest(
+    const URI& uri, FragmentInfo* fragment_info) {
+  if (fragment_info == nullptr)
+    return LOG_STATUS(Status_RestError(
+        "Error getting fragment info from REST; fragment info is null."));
+
+  Buffer buff;
+  RETURN_NOT_OK(serialization::fragment_info_request_serialize(
+      *fragment_info, serialization_type_, &buff));
+  // Wrap in a list
+  BufferList serialized;
+  RETURN_NOT_OK(serialized.add_buffer(std::move(buff)));
+
+  // Init curl and form the URL
+  Curl curlc(logger_);
+  std::string array_ns, array_uri;
+  RETURN_NOT_OK(uri.get_rest_components(&array_ns, &array_uri));
+  const std::string cache_key = array_ns + ":" + array_uri;
+  RETURN_NOT_OK(
+      curlc.init(config_, extra_headers_, &redirect_meta_, &redirect_mtx_));
+  const std::string url = redirect_uri(cache_key) + "/v1/arrays/" + array_ns +
+                          "/" + curlc.url_escape(array_uri) + "/fragment_info";
+
+  // Get the data
+  Buffer returned_data;
+  RETURN_NOT_OK(curlc.post_data(
+      stats_,
+      url,
+      serialization_type_,
+      &serialized,
+      &returned_data,
+      cache_key));
+  if (returned_data.data() == nullptr || returned_data.size() == 0)
+    return LOG_STATUS(Status_RestError(
+        "Error getting fragment info from REST; server returned no data."));
+
+  // Ensure data has a null delimiter for cap'n proto if using JSON
+  RETURN_NOT_OK(ensure_json_null_delimited_string(&returned_data));
+  return serialization::fragment_info_deserialize(
+      fragment_info, serialization_type_, uri, returned_data);
+}
+
+Status RestClient::post_group_metadata_from_rest(const URI& uri, Group* group) {
+  if (group == nullptr) {
+    return LOG_STATUS(Status_RestError(
+        "Error posting group metadata from REST; group is null."));
+  }
+
+  Buffer buff;
+  RETURN_NOT_OK(serialization::group_metadata_serialize(
+      group, serialization_type_, &buff));
+  // Wrap in a list
+  BufferList serialized;
+  RETURN_NOT_OK(serialized.add_buffer(std::move(buff)));
+
+  // Init curl and form the URL
+  Curl curlc(logger_);
+  std::string group_ns, group_uri;
+  RETURN_NOT_OK(uri.get_rest_components(&group_ns, &group_uri));
+  const std::string cache_key = group_ns + ":" + group_uri;
+  RETURN_NOT_OK(
+      curlc.init(config_, extra_headers_, &redirect_meta_, &redirect_mtx_));
+  const std::string url = redirect_uri(cache_key) + "/v2/groups/" + group_ns +
+                          "/" + curlc.url_escape(group_uri) + "/metadata";
+
+  // Get the data
+  Buffer returned_data;
+  RETURN_NOT_OK(curlc.post_data(
+      stats_,
+      url,
+      serialization_type_,
+      &serialized,
+      &returned_data,
+      cache_key));
+  if (returned_data.data() == nullptr || returned_data.size() == 0) {
+    return LOG_STATUS(Status_RestError(
+        "Error getting group metadata from REST; server returned no data."));
+  }
+
+  // Ensure data has a null delimiter for cap'n proto if using JSON
+  RETURN_NOT_OK(ensure_json_null_delimited_string(&returned_data));
+  return serialization::metadata_deserialize(
+      group->unsafe_metadata(), serialization_type_, returned_data);
+}
+
+Status RestClient::put_group_metadata_to_rest(const URI& uri, Group* group) {
+  if (group == nullptr) {
+    return LOG_STATUS(Status_RestError(
+        "Error posting group metadata to REST; group is null."));
+  }
+
+  Buffer buff;
+  RETURN_NOT_OK(serialization::group_metadata_serialize(
+      group, serialization_type_, &buff));
+  // Wrap in a list
+  BufferList serialized;
+  RETURN_NOT_OK(serialized.add_buffer(std::move(buff)));
+
+  // Init curl and form the URL
+  Curl curlc(logger_);
+  std::string group_ns, group_uri;
+  RETURN_NOT_OK(uri.get_rest_components(&group_ns, &group_uri));
+  const std::string cache_key = group_ns + ":" + group_uri;
+  RETURN_NOT_OK(
+      curlc.init(config_, extra_headers_, &redirect_meta_, &redirect_mtx_));
+  const std::string url = redirect_uri(cache_key) + "/v2/groups/" + group_ns +
+                          "/" + curlc.url_escape(group_uri) + "/metadata";
+
+  // Put the data
+  Buffer returned_data;
+  return curlc.put_data(
+      stats_, url, serialization_type_, &serialized, &returned_data, cache_key);
+}
+
+Status RestClient::post_group_create_to_rest(const URI& uri, Group* group) {
+  if (group == nullptr) {
+    return LOG_STATUS(
+        Status_RestError("Error posting group to REST; group is null."));
+  }
+
+  Buffer buff;
+  RETURN_NOT_OK(
+      serialization::group_create_serialize(group, serialization_type_, &buff));
+  // Wrap in a list
+  BufferList serialized;
+  RETURN_NOT_OK(serialized.add_buffer(std::move(buff)));
+
+  // Init curl and form the URL
+  Curl curlc(logger_);
+  std::string group_ns, group_uri;
+  RETURN_NOT_OK(uri.get_rest_components(&group_ns, &group_uri));
+  const std::string cache_key = group_ns + ":" + group_uri;
+  RETURN_NOT_OK(
+      curlc.init(config_, extra_headers_, &redirect_meta_, &redirect_mtx_));
+  const std::string url = redirect_uri(cache_key) + "/v2/groups/" + group_ns;
+
+  // Create the group and check for error
+  Buffer returned_data;
+  return curlc.post_data(
+      stats_, url, serialization_type_, &serialized, &returned_data, cache_key);
+}
+
+Status RestClient::post_group_from_rest(const URI& uri, Group* group) {
+  if (group == nullptr) {
+    return LOG_STATUS(
+        Status_RestError("Error posting group to REST; group is null."));
+  }
+
+  Buffer buff;
+  RETURN_NOT_OK(
+      serialization::group_serialize(group, serialization_type_, &buff));
+  // Wrap in a list
+  BufferList serialized;
+  RETURN_NOT_OK(serialized.add_buffer(std::move(buff)));
+
+  // Init curl and form the URL
+  Curl curlc(logger_);
+  std::string group_ns, group_uri;
+  RETURN_NOT_OK(uri.get_rest_components(&group_ns, &group_uri));
+  const std::string cache_key = group_ns + ":" + group_uri;
+  RETURN_NOT_OK(
+      curlc.init(config_, extra_headers_, &redirect_meta_, &redirect_mtx_));
+  const std::string url = redirect_uri(cache_key) + "/v2/groups/" + group_ns +
+                          "/" + curlc.url_escape(group_uri);
+
+  // Get the data
+  Buffer returned_data;
+  RETURN_NOT_OK(curlc.post_data(
+      stats_,
+      url,
+      serialization_type_,
+      &serialized,
+      &returned_data,
+      cache_key));
+
+  if (returned_data.data() == nullptr || returned_data.size() == 0)
+    return LOG_STATUS(Status_RestError(
+        "Error getting group from REST; server returned no data."));
+
+  // Ensure data has a null delimiter for cap'n proto if using JSON
+  RETURN_NOT_OK(ensure_json_null_delimited_string(&returned_data));
+  return serialization::group_details_deserialize(
+      group, serialization_type_, returned_data);
+}
+
+Status RestClient::patch_group_to_rest(const URI& uri, Group* group) {
+  if (group == nullptr) {
+    return LOG_STATUS(
+        Status_RestError("Error patching group to REST; group is null."));
+  }
+
+  Buffer buff;
+  RETURN_NOT_OK(
+      serialization::group_update_serialize(group, serialization_type_, &buff));
+
+  // Wrap in a list
+  BufferList serialized;
+  RETURN_NOT_OK(serialized.add_buffer(std::move(buff)));
+
+  // Init curl and form the URL
+  Curl curlc(logger_);
+  std::string group_ns, group_uri;
+  RETURN_NOT_OK(uri.get_rest_components(&group_ns, &group_uri));
+  const std::string cache_key = group_ns + ":" + group_uri;
+  RETURN_NOT_OK(
+      curlc.init(config_, extra_headers_, &redirect_meta_, &redirect_mtx_));
+  const std::string url = redirect_uri(cache_key) + "/v2/groups/" + group_ns +
+                          "/" + curlc.url_escape(group_uri);
+
+  // Put the data
+  Buffer returned_data;
+  return curlc.patch_data(
+      stats_, url, serialization_type_, &serialized, &returned_data, cache_key);
+}
+
+Status RestClient::ensure_json_null_delimited_string(Buffer* buffer) {
+  if (serialization_type_ == SerializationType::JSON &&
+      buffer->value<char>(buffer->size() - 1) != '\0') {
+    RETURN_NOT_OK(buffer->write("\0", sizeof(char)));
+  }
+  return Status::Ok();
+}
+
 #else
 
 RestClient::RestClient() {
@@ -813,75 +1286,138 @@ RestClient::RestClient() {
   (void)serialization_type_;
 }
 
-Status RestClient::init(stats::Stats*, const Config*, ThreadPool*) {
+Status RestClient::init(
+    stats::Stats*, const Config*, ThreadPool*, const std::shared_ptr<Logger>&) {
   return LOG_STATUS(
-      Status::RestError("Cannot use rest client; serialization not enabled."));
+      Status_RestError("Cannot use rest client; serialization not enabled."));
 }
 
 Status RestClient::set_header(const std::string&, const std::string&) {
   return LOG_STATUS(
-      Status::RestError("Cannot use rest client; serialization not enabled."));
+      Status_RestError("Cannot use rest client; serialization not enabled."));
 }
 
-Status RestClient::get_array_schema_from_rest(const URI&, ArraySchema**) {
-  return LOG_STATUS(
-      Status::RestError("Cannot use rest client; serialization not enabled."));
+tuple<Status, optional<shared_ptr<ArraySchema>>>
+RestClient::get_array_schema_from_rest(const URI&) {
+  return {LOG_STATUS(Status_RestError(
+              "Cannot use rest client; serialization not enabled.")),
+          nullopt};
 }
 
-Status RestClient::post_array_schema_to_rest(const URI&, ArraySchema*) {
+Status RestClient::post_array_schema_to_rest(const URI&, const ArraySchema&) {
   return LOG_STATUS(
-      Status::RestError("Cannot use rest client; serialization not enabled."));
+      Status_RestError("Cannot use rest client; serialization not enabled."));
+}
+
+Status RestClient::post_array_from_rest(const URI&, Array*) {
+  return LOG_STATUS(
+      Status_RestError("Cannot use rest client; serialization not enabled."));
+}
+
+void RestClient::delete_array_from_rest(const URI&) {
+  throw StatusException(
+      Status_RestError("Cannot use rest client; serialization not enabled."));
 }
 
 Status RestClient::deregister_array_from_rest(const URI&) {
   return LOG_STATUS(
-      Status::RestError("Cannot use rest client; serialization not enabled."));
+      Status_RestError("Cannot use rest client; serialization not enabled."));
 }
 
 Status RestClient::get_array_non_empty_domain(Array*, uint64_t, uint64_t) {
   return LOG_STATUS(
-      Status::RestError("Cannot use rest client; serialization not enabled."));
+      Status_RestError("Cannot use rest client; serialization not enabled."));
 }
 
 Status RestClient::get_array_max_buffer_sizes(
     const URI&,
-    const ArraySchema*,
+    const ArraySchema&,
     const void*,
     std::unordered_map<std::string, std::pair<uint64_t, uint64_t>>*) {
   return LOG_STATUS(
-      Status::RestError("Cannot use rest client; serialization not enabled."));
+      Status_RestError("Cannot use rest client; serialization not enabled."));
 }
 
 Status RestClient::get_array_metadata_from_rest(
     const URI&, uint64_t, uint64_t, Array*) {
   return LOG_STATUS(
-      Status::RestError("Cannot use rest client; serialization not enabled."));
+      Status_RestError("Cannot use rest client; serialization not enabled."));
 }
 
-Status RestClient::post_array_metadata_to_rest(const URI&, Array*) {
+Status RestClient::post_array_metadata_to_rest(
+    const URI&, uint64_t, uint64_t, Array*) {
   return LOG_STATUS(
-      Status::RestError("Cannot use rest client; serialization not enabled."));
+      Status_RestError("Cannot use rest client; serialization not enabled."));
 }
 
 Status RestClient::submit_query_to_rest(const URI&, Query*) {
   return LOG_STATUS(
-      Status::RestError("Cannot use rest client; serialization not enabled."));
+      Status_RestError("Cannot use rest client; serialization not enabled."));
 }
 
 Status RestClient::finalize_query_to_rest(const URI&, Query*) {
   return LOG_STATUS(
-      Status::RestError("Cannot use rest client; serialization not enabled."));
+      Status_RestError("Cannot use rest client; serialization not enabled."));
+}
+
+Status RestClient::submit_and_finalize_query_to_rest(const URI&, Query*) {
+  return LOG_STATUS(
+      Status_RestError("Cannot use rest client; serialization not enabled."));
 }
 
 Status RestClient::get_query_est_result_sizes(const URI&, Query*) {
   return LOG_STATUS(
-      Status::RestError("Cannot use rest client; serialization not enabled."));
+      Status_RestError("Cannot use rest client; serialization not enabled."));
 }
 
 Status RestClient::post_array_schema_evolution_to_rest(
     const URI&, ArraySchemaEvolution*) {
   return LOG_STATUS(
-      Status::RestError("Cannot use rest client; serialization not enabled."));
+      Status_RestError("Cannot use rest client; serialization not enabled."));
+}
+
+tuple<Status, std::optional<bool>> RestClient::check_array_exists_from_rest(
+    const URI&) {
+  return {LOG_STATUS(Status_RestError(
+              "Cannot use rest client; serialization not enabled.")),
+          std::nullopt};
+}
+
+tuple<Status, std::optional<bool>> RestClient::check_group_exists_from_rest(
+    const URI&) {
+  return {LOG_STATUS(Status_RestError(
+              "Cannot use rest client; serialization not enabled.")),
+          std::nullopt};
+}
+
+Status RestClient::post_group_metadata_from_rest(const URI&, Group*) {
+  return LOG_STATUS(
+      Status_RestError("Cannot use rest client; serialization not enabled."));
+}
+
+Status RestClient::post_fragment_info_from_rest(const URI&, FragmentInfo*) {
+  return LOG_STATUS(
+      Status_RestError("Cannot use rest client; serialization not enabled."));
+}
+
+Status RestClient::put_group_metadata_to_rest(const URI&, Group*) {
+  return LOG_STATUS(
+      Status_RestError("Cannot use rest client; serialization not enabled."));
+}
+
+Status RestClient::post_group_create_to_rest(const URI&, Group*) {
+  return LOG_STATUS(
+      Status_RestError("Cannot use rest client; serialization not enabled."));
+}
+
+Status RestClient::post_group_from_rest(const URI&, Group*) {
+  return LOG_STATUS(
+      Status_RestError("Cannot use rest client; serialization not enabled."));
+}
+
+Status RestClient::patch_group_to_rest(const URI&, Group*) {
+  return LOG_STATUS(
+      Status_RestError("Cannot use rest client; serialization not enabled."));
 }
 
 #endif  // TILEDB_SERIALIZATION

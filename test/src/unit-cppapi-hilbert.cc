@@ -30,11 +30,12 @@
  * Tests the C++ API for array related functions.
  */
 
-#include "catch.hpp"
-#include "test/src/helpers.h"
+#include <test/support/tdb_catch.h>
+#include "test/support/src/helpers.h"
 #include "tiledb/sm/cpp_api/tiledb"
 
 using namespace tiledb;
+using namespace tiledb::test;
 
 void create_int32_array(const std::string& array_name) {
   Context ctx;
@@ -353,6 +354,39 @@ TEST_CASE(
     CHECK(r_buff_d2 == c_buff_d2);
   }
 
+  // Read
+  SECTION("- Unordered, overlapped") {
+    // regression test for sc-11244
+    Array array_r(ctx, array_name, TILEDB_READ);
+    Query query_r(ctx, array_r, TILEDB_READ);
+    // There are only 6 results but we have to over-allocate
+    // the buffer here in order for the overlapped query to complete.
+    // We check the result count below.
+    std::vector<int32_t> r_buff_a(7);
+    std::vector<int32_t> r_buff_d1(7);
+    std::vector<int32_t> r_buff_d2(7);
+
+    query_r.set_data_buffer("a", r_buff_a);
+    query_r.set_data_buffer("d1", r_buff_d1);
+    query_r.set_data_buffer("d2", r_buff_d2);
+
+    query_r.add_range("d1", (int32_t)1, (int32_t)5);
+    query_r.add_range("d2", (int32_t)1, (int32_t)3);
+    query_r.add_range("d2", (int32_t)2, (int32_t)4);
+    query_r.set_layout(TILEDB_UNORDERED);
+    CHECK_NOTHROW(query_r.submit());
+    CHECK(query_r.query_status() == tiledb::Query::Status::COMPLETE);
+    // check number of results
+    uint64_t num = query_r.result_buffer_elements()["a"].second;
+    CHECK(num == 6);
+    array_r.close();
+
+    // Check results
+    check_counts(span(r_buff_a.data(), num), {0, 2, 2, 1, 1});
+    check_counts(span(r_buff_d1.data(), num), {0, 3, 0, 0, 2, 1});
+    check_counts(span(r_buff_d2.data(), num), {0, 1, 2, 2, 1});
+  }
+
   // Remove array
   if (vfs.is_dir(array_name))
     CHECK_NOTHROW(vfs.remove_dir(array_name));
@@ -407,9 +441,10 @@ TEST_CASE(
 
     // Check results again
     CHECK(
-        query_r.query_status() == (test::use_refactored_readers() ?
-                                       Query::Status::COMPLETE :
-                                       Query::Status::INCOMPLETE));
+        query_r.query_status() ==
+        (test::use_refactored_sparse_global_order_reader() ?
+             Query::Status::COMPLETE :
+             Query::Status::INCOMPLETE));
     CHECK(query_r.result_buffer_elements()["a"].second == 2);
     c_buff_a = {4, 1};
     c_buff_d1 = {5, 4};
@@ -422,7 +457,7 @@ TEST_CASE(
      * Old reader needs an extra round here to finish processing all the
      * partitions in the subarray. New reader is done earlier.
      */
-    if (!test::use_refactored_readers()) {
+    if (!test::use_refactored_sparse_global_order_reader()) {
       // Read until complete
       CHECK_NOTHROW(query_r.submit());
       CHECK(query_r.query_status() == Query::Status::COMPLETE);
@@ -480,6 +515,16 @@ TEST_CASE(
 TEST_CASE(
     "C++ API: Test Hilbert, test writing in global order",
     "[cppapi][hilbert][write][global-order]") {
+  bool serialized_writes = false;
+  SECTION("no serialization") {
+    serialized_writes = false;
+  }
+#ifdef TILEDB_SERIALIZATION
+  SECTION("serialization enabled global order write") {
+    serialized_writes = true;
+  }
+#endif
+
   Context ctx;
   VFS vfs(ctx);
   std::string array_name = "hilbert_array";
@@ -507,8 +552,13 @@ TEST_CASE(
   buff_a = {2, 3, 4, 1};
   buff_d1 = {1, 1, 5, 4};
   buff_d2 = {3, 1, 4, 2};
-  CHECK_NOTHROW(query_w.submit());
-  query_w.finalize();
+
+  if (!serialized_writes) {
+    CHECK_NOTHROW(query_w.submit());
+    query_w.finalize();
+  } else {
+    submit_and_finalize_serialized_query(ctx, query_w);
+  }
   array_w.close();
 
   // Remove array
@@ -691,7 +741,10 @@ TEST_CASE(
 TEST_CASE(
     "C++ API: Test Hilbert, consolidation",
     "[cppapi][hilbert][consolidation]") {
-  Context ctx;
+  Config cfg;
+  cfg["sm.consolidation.buffer_size"] = "10000";
+
+  Context ctx(cfg);
   VFS vfs(ctx);
   std::string array_name = "hilbert_array";
 
@@ -722,8 +775,8 @@ TEST_CASE(
   config["sm.vacuum.mode"] = "fragments";
   CHECK_NOTHROW(Array::consolidate(ctx, array_name, &config));
   CHECK_NOTHROW(Array::vacuum(ctx, array_name, &config));
-  auto contents = vfs.ls(array_name);
-  CHECK(contents.size() == 5);
+  auto contents = vfs.ls(get_fragment_dir(array_name));
+  CHECK(contents.size() == 1);
 
   Array array_r(ctx, array_name, TILEDB_READ);
   Query query_r(ctx, array_r, TILEDB_READ);
@@ -869,9 +922,10 @@ TEST_CASE(
 
     // Check results again
     CHECK(
-        query_r.query_status() == (test::use_refactored_readers() ?
-                                       Query::Status::COMPLETE :
-                                       Query::Status::INCOMPLETE));
+        query_r.query_status() ==
+        (test::use_refactored_sparse_global_order_reader() ?
+             Query::Status::COMPLETE :
+             Query::Status::INCOMPLETE));
     CHECK(query_r.result_buffer_elements()["a"].second == 2);
     c_buff_a = {4, 1};
     c_buff_d1 = {-45, -46};
@@ -884,7 +938,7 @@ TEST_CASE(
      * Old reader needs an extra round here to finish processing all the
      * partitions in the subarray. New reader is done earlier.
      */
-    if (!test::use_refactored_readers()) {
+    if (!test::use_refactored_sparse_global_order_reader()) {
       // Read until complete
       CHECK_NOTHROW(query_r.submit());
       CHECK(query_r.query_status() == Query::Status::COMPLETE);
@@ -1069,7 +1123,10 @@ TEST_CASE(
 TEST_CASE(
     "C++ API: Test Hilbert, 2d, int32, negative, consolidation",
     "[cppapi][hilbert][2d][int32][negative][consolidation]") {
-  Context ctx;
+  Config cfg;
+  cfg["sm.consolidation.buffer_size"] = "10000";
+
+  Context ctx(cfg);
   VFS vfs(ctx);
   std::string array_name = "hilbert_array";
 
@@ -1100,8 +1157,8 @@ TEST_CASE(
   config["sm.vacuum.mode"] = "fragments";
   CHECK_NOTHROW(Array::consolidate(ctx, array_name, &config));
   CHECK_NOTHROW(Array::vacuum(ctx, array_name, &config));
-  auto contents = vfs.ls(array_name);
-  CHECK(contents.size() == 5);
+  auto contents = vfs.ls(get_fragment_dir(array_name));
+  CHECK(contents.size() == 1);
 
   Array array_r(ctx, array_name, TILEDB_READ);
   Query query_r(ctx, array_r, TILEDB_READ);
@@ -1284,9 +1341,10 @@ TEST_CASE(
 
     // Check results again
     CHECK(
-        query_r.query_status() == (test::use_refactored_readers() ?
-                                       Query::Status::COMPLETE :
-                                       Query::Status::INCOMPLETE));
+        query_r.query_status() ==
+        (test::use_refactored_sparse_global_order_reader() ?
+             Query::Status::COMPLETE :
+             Query::Status::INCOMPLETE));
     CHECK(query_r.result_buffer_elements()["a"].second == 2);
     c_buff_a = {1, 4};
     c_buff_d1 = {0.41f, 0.4f};
@@ -1299,7 +1357,7 @@ TEST_CASE(
      * Old reader needs an extra round here to finish processing all the
      * partitions in the subarray. New reader is done earlier.
      */
-    if (!test::use_refactored_readers()) {
+    if (!test::use_refactored_sparse_global_order_reader()) {
       // Read until complete
       CHECK_NOTHROW(query_r.submit());
       CHECK(query_r.query_status() == Query::Status::COMPLETE);
@@ -1338,9 +1396,10 @@ TEST_CASE(
 
     // Check results again
     CHECK(
-        query_r.query_status() == (test::use_refactored_readers() ?
-                                       Query::Status::COMPLETE :
-                                       Query::Status::INCOMPLETE));
+        query_r.query_status() ==
+        (test::use_refactored_sparse_global_order_reader() ?
+             Query::Status::COMPLETE :
+             Query::Status::INCOMPLETE));
     CHECK(query_r.result_buffer_elements()["a"].second == 2);
     c_buff_a = {1, 4};
     c_buff_d1 = {0.41f, 0.4f};
@@ -1353,7 +1412,7 @@ TEST_CASE(
      * Old reader needs an extra round here to finish processing all the
      * partitions in the subarray. New reader is done earlier.
      */
-    if (!test::use_refactored_readers()) {
+    if (!test::use_refactored_sparse_global_order_reader()) {
       // Read until complete
       CHECK_NOTHROW(query_r.submit());
       CHECK(query_r.query_status() == Query::Status::COMPLETE);
@@ -1441,7 +1500,7 @@ TEST_CASE(
 }
 
 TEST_CASE(
-    "C++ API: Test Hilbert, 2d, floa32, multiple fragments, read in "
+    "C++ API: Test Hilbert, 2d, float32, multiple fragments, read in "
     "global order",
     "[cppapi][hilbert][2d][float32][read][multiple-fragments][global-"
     "order]") {
@@ -1508,7 +1567,10 @@ TEST_CASE(
 TEST_CASE(
     "C++ API: Test Hilbert, 2d, float32, consolidation",
     "[cppapi][hilbert][2d][float32][consolidation]") {
-  Context ctx;
+  Config cfg;
+  cfg["sm.consolidation.buffer_size"] = "10000";
+
+  Context ctx(cfg);
   VFS vfs(ctx);
   std::string array_name = "hilbert_array";
 
@@ -1539,8 +1601,8 @@ TEST_CASE(
   config["sm.vacuum.mode"] = "fragments";
   CHECK_NOTHROW(Array::consolidate(ctx, array_name, &config));
   CHECK_NOTHROW(Array::vacuum(ctx, array_name, &config));
-  auto contents = vfs.ls(array_name);
-  CHECK(contents.size() == 5);
+  auto contents = vfs.ls(get_fragment_dir(array_name));
+  CHECK(contents.size() == 1);
 
   Array array_r(ctx, array_name, TILEDB_READ);
   Query query_r(ctx, array_r, TILEDB_READ);
@@ -1824,8 +1886,8 @@ TEST_CASE(
   config["sm.vacuum.mode"] = "fragments";
   CHECK_NOTHROW(Array::consolidate(ctx, array_name, &config));
   CHECK_NOTHROW(Array::vacuum(ctx, array_name, &config));
-  auto contents = vfs.ls(array_name);
-  CHECK(contents.size() == 5);
+  auto contents = vfs.ls(get_fragment_dir(array_name));
+  CHECK(contents.size() == 1);
 
   // Read
   Array array_r(ctx, array_name, TILEDB_READ);
@@ -2050,7 +2112,7 @@ TEST_CASE(
      * Refactored reader tries to fill as much as possible.
      * Old reader splits partition in two.
      */
-    if (test::use_refactored_readers()) {
+    if (test::use_refactored_sparse_global_order_reader()) {
       CHECK(query_r.result_buffer_elements()["a"].second == 3);
       c_buff_a = {3, 2, 1};
       c_buff_d1 = std::string("dogcamel33");
@@ -2087,7 +2149,7 @@ TEST_CASE(
     r_off_d2.resize(query_r.result_buffer_elements()["d2"].first);
     r_buff_a.resize(query_r.result_buffer_elements()["a"].second);
 
-    if (test::use_refactored_readers()) {
+    if (test::use_refactored_sparse_global_order_reader()) {
       CHECK(query_r.result_buffer_elements()["a"].second == 1);
       c_buff_a = {4};
       c_buff_d1 = std::string("1a");
@@ -2154,7 +2216,7 @@ TEST_CASE(
      * Refactored reader tries to fill as much as possible.
      * Old reader splits partition in two.
      */
-    if (test::use_refactored_readers()) {
+    if (test::use_refactored_sparse_global_order_reader()) {
       CHECK(query_r.result_buffer_elements()["a"].second == 3);
       c_buff_a = {3, 2, 1};
       c_buff_d1 = std::string("dogcamel33");
@@ -2191,7 +2253,7 @@ TEST_CASE(
     r_off_d2.resize(query_r.result_buffer_elements()["d2"].first);
     r_buff_a.resize(query_r.result_buffer_elements()["a"].second);
 
-    if (test::use_refactored_readers()) {
+    if (test::use_refactored_sparse_global_order_reader()) {
       CHECK(query_r.result_buffer_elements()["a"].second == 1);
       c_buff_a = {4};
       c_buff_d1 = std::string("1a");

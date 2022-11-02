@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2021 TileDB, Inc.
+ * @copyright Copyright (c) 2021-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -31,8 +31,8 @@
  * array schemas.
  */
 
-#include "catch.hpp"
-#include "test/src/helpers.h"
+#include <test/support/tdb_catch.h>
+#include "test/support/src/helpers.h"
 #ifdef _WIN32
 #include "tiledb/sm/filesystem/win.h"
 #else
@@ -207,6 +207,7 @@ class SmokeTestFx {
    * @param cell_order The cell order of the array.
    * @param tile_order The tile order of the array.
    * @param write_order The write layout.
+   * @param read_order The read layout.
    * @param encryption_type The encryption type.
    */
   void smoke_test(
@@ -217,7 +218,9 @@ class SmokeTestFx {
       tiledb_layout_t cell_order,
       tiledb_layout_t tile_order,
       tiledb_layout_t write_order,
-      tiledb_encryption_type_t encryption_type);
+      tiledb_layout_t read_order,
+      tiledb_encryption_type_t encryption_type,
+      tiledb_query_condition_combination_op_t combination_op);
 
  private:
   /** The C-API context object. */
@@ -282,6 +285,7 @@ class SmokeTestFx {
    * @param test_query_conditions The attribute conditions to filter on.
    * @param test_query_buffers The query buffers to read.
    * @param subarray The subarray to read.
+   * @param read_order The read layout.
    * @param encryption_type The encryption type of the array.
    */
   void read(
@@ -289,7 +293,9 @@ class SmokeTestFx {
       const vector<shared_ptr<test_query_condition_t>>& test_query_conditions,
       const vector<test_query_buffer_t>& test_query_buffers,
       const void* subarray,
-      tiledb_encryption_type_t encryption_type);
+      tiledb_layout_t read_order,
+      tiledb_encryption_type_t encryption_type,
+      tiledb_query_condition_combination_op_t combination_op);
 };
 
 /** The string template-typed test_query_condition_t implementation. */
@@ -492,6 +498,9 @@ void SmokeTestFx::create_array(
     rc = tiledb_array_schema_add_attribute(ctx_, array_schema, attr);
     REQUIRE(rc == TILEDB_OK);
   }
+  if (array_type != TILEDB_DENSE) {
+    rc = tiledb_array_schema_set_allows_dups(ctx_, array_schema, true);
+  }
 
   // Check array schema
   rc = tiledb_array_schema_check(ctx_, array_schema);
@@ -647,17 +656,14 @@ void SmokeTestFx::write(
     }
   }
 
-  // Submit the query.
   rc = tiledb_query_submit(ctx_, query);
   REQUIRE(rc == TILEDB_OK);
 
-  // Check query status.
   tiledb_query_status_t status;
   rc = tiledb_query_get_status(ctx_, query, &status);
   CHECK(rc == TILEDB_OK);
   CHECK(status == TILEDB_COMPLETED);
 
-  // Finalize the query, a no-op for non-global writes.
   rc = tiledb_query_finalize(ctx_, query);
   REQUIRE(rc == TILEDB_OK);
 
@@ -673,7 +679,9 @@ void SmokeTestFx::read(
     const vector<shared_ptr<test_query_condition_t>>& test_query_conditions,
     const vector<test_query_buffer_t>& test_query_buffers,
     const void* subarray,
-    tiledb_encryption_type_t encryption_type) {
+    tiledb_layout_t read_order,
+    tiledb_encryption_type_t encryption_type,
+    tiledb_query_condition_combination_op_t combination_op) {
   // Open the array for reading (with or without encryption).
   tiledb_array_t* array;
   int rc =
@@ -704,6 +712,10 @@ void SmokeTestFx::read(
   // Create the read query.
   tiledb_query_t* query;
   rc = tiledb_query_alloc(ctx_, array, TILEDB_READ, &query);
+  REQUIRE(rc == TILEDB_OK);
+
+  // Set the layout.
+  rc = tiledb_query_set_layout(ctx_, query, read_order);
   REQUIRE(rc == TILEDB_OK);
 
   // Set the query buffers.
@@ -803,7 +815,7 @@ void SmokeTestFx::read(
           ctx_,
           combined_query_condition,
           query_condition,
-          TILEDB_AND,
+          combination_op,
           &tmp_query_condition);
       REQUIRE(rc == TILEDB_OK);
       tiledb_query_condition_free(&combined_query_condition);
@@ -848,7 +860,9 @@ void SmokeTestFx::smoke_test(
     tiledb_layout_t cell_order,
     tiledb_layout_t tile_order,
     tiledb_layout_t write_order,
-    tiledb_encryption_type_t encryption_type) {
+    tiledb_layout_t read_order,
+    tiledb_encryption_type_t encryption_type,
+    tiledb_query_condition_combination_op_t combination_op) {
   const string array_name = "smoke_test_array";
 
   // Skip row-major and col-major writes for sparse arrays.
@@ -857,10 +871,11 @@ void SmokeTestFx::smoke_test(
     return;
   }
 
-  // Skip unordered writes for dense arrays.
-  if (array_type == TILEDB_DENSE && write_order == TILEDB_UNORDERED) {
-    return;
-  }
+  // Skip unordered writes/reads and global order reads for dense arrays.
+  if (array_type == TILEDB_DENSE)
+    if (write_order == TILEDB_UNORDERED || read_order == TILEDB_UNORDERED ||
+        read_order == TILEDB_GLOBAL_ORDER)
+      return;
 
   // String_ascii, float32, and float64 types can only be
   // written to sparse arrays.
@@ -1164,7 +1179,9 @@ void SmokeTestFx::smoke_test(
       test_query_conditions,
       read_query_buffers,
       subarray_full,
-      encryption_type);
+      read_order,
+      encryption_type,
+      combination_op);
 
   // Map each cell value to a bool that indicates whether or
   // not we expect it in the read results.
@@ -1182,9 +1199,13 @@ void SmokeTestFx::smoke_test(
   for (const auto& test_query_condition : test_query_conditions) {
     if (test_query_condition->name_ == "a") {
       for (uint64_t i = 0; i < total_cells; ++i) {
-        const bool expected = test_query_condition->cmp(&a_write_buffer[i]);
-        if (!expected) {
-          expected_a_values_read[i] = false;
+        const bool expected = test_query_condition->cmp(&a_write_buffer[i]) &&
+                              a_write_buffer_validity[i];
+        REQUIRE((combination_op == TILEDB_AND || combination_op == TILEDB_OR));
+        if (combination_op == TILEDB_AND) {
+          expected_a_values_read[i] = expected_a_values_read[i] && expected;
+        } else {
+          expected_a_values_read[i] = expected_a_values_read[i] || expected;
         }
       }
     } else {
@@ -1192,8 +1213,15 @@ void SmokeTestFx::smoke_test(
       for (uint64_t i = 0; i < total_cells; ++i) {
         const bool expected =
             test_query_condition->cmp(&c_write_buffer[(i * 2)]);
-        if (!expected) {
-          expected_c_values_read[string(&c_write_buffer[i * 2], 2)] = false;
+        REQUIRE((combination_op == TILEDB_AND || combination_op == TILEDB_OR));
+        if (combination_op == TILEDB_AND) {
+          expected_c_values_read[string(&c_write_buffer[i * 2], 2)] =
+              expected_c_values_read[string(&c_write_buffer[i * 2], 2)] &&
+              expected;
+        } else {
+          expected_c_values_read[string(&c_write_buffer[i * 2], 2)] =
+              expected_c_values_read[string(&c_write_buffer[i * 2], 2)] ||
+              expected;
         }
       }
     }
@@ -1336,6 +1364,7 @@ TEST_CASE_METHOD(
   query_conditions_vec.push_back({make_condition<int32_t>("a", TILEDB_GE, 3)});
   query_conditions_vec.push_back({make_condition<int32_t>("a", TILEDB_EQ, 7)});
   query_conditions_vec.push_back({make_condition<int32_t>("a", TILEDB_NE, 10)});
+
   query_conditions_vec.push_back({
       make_condition<int32_t>("a", TILEDB_GT, 6),
       make_condition<int32_t>("a", TILEDB_LE, 20),
@@ -1345,12 +1374,14 @@ TEST_CASE_METHOD(
       make_condition<int32_t>("a", TILEDB_GE, 7),
       make_condition<int32_t>("a", TILEDB_NE, 9),
   });
+
   query_conditions_vec.push_back(
       {make_condition<const char*>("c", TILEDB_LT, "ae")});
   query_conditions_vec.push_back(
       {make_condition<const char*>("c", TILEDB_GE, "ad")});
   query_conditions_vec.push_back(
       {make_condition<const char*>("c", TILEDB_EQ, "ab")});
+
   query_conditions_vec.push_back(
       {make_condition<int32_t>("a", TILEDB_LT, 30),
        make_condition<const char*>("c", TILEDB_GE, "ad")});
@@ -1380,19 +1411,28 @@ TEST_CASE_METHOD(
                  {TILEDB_NO_ENCRYPTION, TILEDB_AES_256_GCM}) {
               for (const tiledb_layout_t write_order :
                    {TILEDB_ROW_MAJOR, TILEDB_UNORDERED}) {
-                vector<test_dim_t> test_dims;
-                for (const test_dim_t& dim : dims) {
-                  test_dims.emplace_back(dim);
+                for (const tiledb_layout_t read_order : {TILEDB_ROW_MAJOR,
+                                                         TILEDB_UNORDERED,
+                                                         TILEDB_GLOBAL_ORDER}) {
+                  for (const tiledb_query_condition_combination_op_t
+                           combination_op : {TILEDB_AND, TILEDB_OR}) {
+                    vector<test_dim_t> test_dims;
+                    for (const test_dim_t& dim : dims) {
+                      test_dims.emplace_back(dim);
 
-                  smoke_test(
-                      test_attrs,
-                      query_conditions,
-                      test_dims,
-                      array_type,
-                      cell_order,
-                      tile_order,
-                      write_order,
-                      encryption_type);
+                      smoke_test(
+                          test_attrs,
+                          query_conditions,
+                          test_dims,
+                          array_type,
+                          cell_order,
+                          tile_order,
+                          write_order,
+                          read_order,
+                          encryption_type,
+                          combination_op);
+                    }
+                  }
                 }
               }
             }

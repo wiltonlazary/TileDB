@@ -30,8 +30,8 @@
  * Tests the `SubarrayPartitioner` class for sparse arrays.
  */
 
-#include "test/src/helpers.h"
-#include "test/src/vfs_helpers.h"
+#include "test/support/src/helpers.h"
+#include "test/support/src/vfs_helpers.h"
 #include "tiledb/sm/c_api/tiledb_struct_def.h"
 #include "tiledb/sm/subarray/subarray_partitioner.h"
 
@@ -41,12 +41,13 @@
 #include "tiledb/sm/filesystem/posix.h"
 #endif
 
-#include <catch.hpp>
+#include <test/support/tdb_catch.h>
 #include <iostream>
 
 using namespace tiledb::common;
 using namespace tiledb::sm;
 using namespace tiledb::test;
+using namespace tiledb::type;
 
 /* ********************************* */
 /*         STRUCT DEFINITION         */
@@ -342,8 +343,7 @@ void SubarrayPartitionerSparseFx::test_subarray_partitioner(
   Subarray subarray;
   create_subarray(array_->array_, ranges, subarray_layout, &subarray);
 
-  ThreadPool tp;
-  CHECK(tp.init(4).ok());
+  ThreadPool tp(4);
   Config config;
   SubarrayPartitioner subarray_partitioner(
       &config,
@@ -352,7 +352,8 @@ void SubarrayPartitionerSparseFx::test_subarray_partitioner(
       memory_budget_var_,
       0,
       &tp,
-      &g_helper_stats);
+      &g_helper_stats,
+      g_helper_logger());
   auto st = subarray_partitioner.set_result_budget(attr.c_str(), budget);
   CHECK(st.ok());
 
@@ -372,8 +373,7 @@ void SubarrayPartitionerSparseFx::test_subarray_partitioner(
   Subarray subarray;
   create_subarray(array_->array_, ranges, subarray_layout, &subarray);
 
-  ThreadPool tp;
-  CHECK(tp.init(4).ok());
+  ThreadPool tp(4);
   Config config;
   SubarrayPartitioner subarray_partitioner(
       &config,
@@ -382,7 +382,8 @@ void SubarrayPartitionerSparseFx::test_subarray_partitioner(
       memory_budget_var,
       0,
       &tp,
-      &g_helper_stats);
+      &g_helper_stats,
+      g_helper_logger());
   auto st = subarray_partitioner.set_result_budget(attr.c_str(), result_budget);
   CHECK(st.ok());
 
@@ -400,8 +401,7 @@ void SubarrayPartitionerSparseFx::test_subarray_partitioner(
   Subarray subarray;
   create_subarray(array_->array_, ranges, subarray_layout, &subarray);
 
-  ThreadPool tp;
-  CHECK(tp.init(4).ok());
+  ThreadPool tp(4);
   Config config;
   SubarrayPartitioner subarray_partitioner(
       &config,
@@ -410,7 +410,8 @@ void SubarrayPartitionerSparseFx::test_subarray_partitioner(
       memory_budget_var_,
       0,
       &tp,
-      &g_helper_stats);
+      &g_helper_stats,
+      g_helper_logger());
 
   // Note: this is necessary, otherwise the subarray partitioner does
   // not check if the memory budget is exceeded for attributes whose
@@ -681,8 +682,7 @@ TEST_CASE_METHOD(
 
   create_subarray(array_->array_, ranges, subarray_layout, &subarray);
 
-  ThreadPool tp;
-  CHECK(tp.init(4).ok());
+  ThreadPool tp(4);
   Config config;
   SubarrayPartitioner subarray_partitioner(
       &config,
@@ -691,7 +691,8 @@ TEST_CASE_METHOD(
       memory_budget_var_,
       0,
       &tp,
-      &g_helper_stats);
+      &g_helper_stats,
+      g_helper_logger());
   auto st = subarray_partitioner.set_result_budget("a", 100);
   CHECK(st.ok());
   st = subarray_partitioner.set_result_budget("b", 1, 1);
@@ -2280,12 +2281,10 @@ TEST_CASE_METHOD(
   }
 
   // Check unsplittable
-  tiledb::sm::Subarray subarray(array->array_, layout, &g_helper_stats);
-  tiledb::sm::Range r;
-  r.set_str_range("bb", "bb");
-  subarray.add_range(0, std::move(r), true);
-  ThreadPool tp;
-  CHECK(tp.init(4).ok());
+  tiledb::sm::Subarray subarray(
+      array->array_.get(), layout, &g_helper_stats, g_helper_logger());
+  CHECK(subarray.add_range(0, Range("bb", "bb"), true).ok());
+  ThreadPool tp(4);
   Config config;
   SubarrayPartitioner partitioner(
       &config,
@@ -2294,7 +2293,8 @@ TEST_CASE_METHOD(
       memory_budget_var_,
       0,
       &tp,
-      &g_helper_stats);
+      &g_helper_stats,
+      g_helper_logger());
   auto st = partitioner.set_result_budget("d", 10);
   CHECK(!st.ok());
   uint64_t budget = 0;
@@ -2311,15 +2311,15 @@ TEST_CASE_METHOD(
   auto partition = partitioner.current();
   CHECK(partition.range_num() == 1);
   const Range* range = nullptr;
-  partition.get_range(0, 0, &range);
+  CHECK(partition.get_range(0, 0, &range).ok());
   CHECK(range != nullptr);
   CHECK(range->start_str() == std::string("bb", 2));
   CHECK(range->end_str() == std::string("bb", 2));
 
   // Check full
-  tiledb::sm::Subarray subarray_full(array->array_, layout, &g_helper_stats);
-  r.set_str_range("a", "bb");
-  subarray_full.add_range(0, std::move(r), true);
+  tiledb::sm::Subarray subarray_full(
+      array->array_.get(), layout, &g_helper_stats, g_helper_logger());
+  CHECK(subarray_full.add_range(0, Range("a", "bb"), true).ok());
   SubarrayPartitioner partitioner_full(
       &config,
       subarray_full,
@@ -2327,7 +2327,8 @@ TEST_CASE_METHOD(
       memory_budget_var_,
       0,
       &tp,
-      &g_helper_stats);
+      &g_helper_stats,
+      g_helper_logger());
   st = partitioner_full.set_result_budget("d", 16, 4);
   CHECK(st.ok());
   CHECK(partitioner_full.get_result_budget("d", &budget_off, &budget_val).ok());
@@ -2337,15 +2338,15 @@ TEST_CASE_METHOD(
   CHECK(!unsplittable);
   partition = partitioner_full.current();
   CHECK(partition.range_num() == 1);
-  partition.get_range(0, 0, &range);
+  CHECK(partition.get_range(0, 0, &range).ok());
   CHECK(range != nullptr);
   CHECK(range->start_str() == std::string("a", 1));
   CHECK(range->end_str() == std::string("bb", 2));
 
   // Check split
-  tiledb::sm::Subarray subarray_split(array->array_, layout, &g_helper_stats);
-  r.set_str_range("a", "bb");
-  subarray_split.add_range(0, std::move(r), true);
+  tiledb::sm::Subarray subarray_split(
+      array->array_.get(), layout, &g_helper_stats, g_helper_logger());
+  CHECK(subarray_split.add_range(0, Range("a", "bb"), true).ok());
   SubarrayPartitioner partitioner_split(
       &config,
       subarray_split,
@@ -2353,7 +2354,8 @@ TEST_CASE_METHOD(
       memory_budget_var_,
       0,
       &tp,
-      &g_helper_stats);
+      &g_helper_stats,
+      g_helper_logger());
   st = partitioner_split.set_result_budget("d", 10, 4);
   CHECK(st.ok());
   CHECK(
@@ -2364,7 +2366,7 @@ TEST_CASE_METHOD(
   CHECK(!unsplittable);
   partition = partitioner_split.current();
   CHECK(partition.range_num() == 1);
-  partition.get_range(0, 0, &range);
+  CHECK(partition.get_range(0, 0, &range).ok());
   CHECK(range != nullptr);
   CHECK(range->start_str() == std::string("a", 1));
   CHECK(range->end_str() == std::string("a\x7F", 2));
@@ -2372,7 +2374,7 @@ TEST_CASE_METHOD(
   CHECK(!unsplittable);
   partition = partitioner_split.current();
   CHECK(partition.range_num() == 1);
-  partition.get_range(0, 0, &range);
+  CHECK(partition.get_range(0, 0, &range).ok());
   CHECK(range != nullptr);
   CHECK(range->start_str() == std::string("b", 1));
   CHECK(range->end_str() == std::string("bb", 2));
@@ -2380,9 +2382,8 @@ TEST_CASE_METHOD(
 
   // Check no split 2 MBRs
   tiledb::sm::Subarray subarray_no_split(
-      array->array_, layout, &g_helper_stats);
-  r.set_str_range("bb", "cc");
-  subarray_no_split.add_range(0, std::move(r), true);
+      array->array_.get(), layout, &g_helper_stats, g_helper_logger());
+  CHECK(subarray_no_split.add_range(0, Range("bb", "cc"), true).ok());
   SubarrayPartitioner partitioner_no_split(
       &config,
       subarray_no_split,
@@ -2390,7 +2391,8 @@ TEST_CASE_METHOD(
       memory_budget_var_,
       0,
       &tp,
-      &g_helper_stats);
+      &g_helper_stats,
+      g_helper_logger());
   st = partitioner_no_split.set_result_budget("d", 16, 10);
   CHECK(st.ok());
   CHECK(partitioner_no_split.get_result_budget("d", &budget_off, &budget_val)
@@ -2402,15 +2404,15 @@ TEST_CASE_METHOD(
   CHECK(!unsplittable);
   partition = partitioner_no_split.current();
   CHECK(partition.range_num() == 1);
-  partition.get_range(0, 0, &range);
+  CHECK(partition.get_range(0, 0, &range).ok());
   CHECK(range != nullptr);
   CHECK(range->start_str() == std::string("bb", 2));
   CHECK(range->end_str() == std::string("cc", 2));
 
   // Check split 2 MBRs
-  tiledb::sm::Subarray subarray_split_2(array->array_, layout, &g_helper_stats);
-  r.set_str_range("bb", "cc");
-  subarray_split_2.add_range(0, std::move(r), true);
+  tiledb::sm::Subarray subarray_split_2(
+      array->array_.get(), layout, &g_helper_stats, g_helper_logger());
+  CHECK(subarray_split_2.add_range(0, Range("bb", "cc"), true).ok());
   SubarrayPartitioner partitioner_split_2(
       &config,
       subarray_split_2,
@@ -2418,7 +2420,8 @@ TEST_CASE_METHOD(
       memory_budget_var_,
       0,
       &tp,
-      &g_helper_stats);
+      &g_helper_stats,
+      g_helper_logger());
   st = partitioner_split_2.set_result_budget("d", 8, 10);
   CHECK(st.ok());
   CHECK(partitioner_split_2.get_result_budget("d", &budget_off, &budget_val)
@@ -2430,7 +2433,7 @@ TEST_CASE_METHOD(
   CHECK(!unsplittable);
   partition = partitioner_split_2.current();
   CHECK(partition.range_num() == 1);
-  partition.get_range(0, 0, &range);
+  CHECK(partition.get_range(0, 0, &range).ok());
   CHECK(range != nullptr);
   CHECK(range->start_str() == std::string("bb", 2));
   CHECK(range->end_str() == std::string("b\x7F", 2));
@@ -2438,7 +2441,7 @@ TEST_CASE_METHOD(
   CHECK(!unsplittable);
   partition = partitioner_split_2.current();
   CHECK(partition.range_num() == 1);
-  partition.get_range(0, 0, &range);
+  CHECK(partition.get_range(0, 0, &range).ok());
   CHECK(range != nullptr);
   CHECK(range->start_str() == std::string("c", 1));
   CHECK(range->end_str() == std::string("cc", 2));
@@ -2545,12 +2548,10 @@ TEST_CASE_METHOD(
     layout = Layout::UNORDERED;
   }
 
-  tiledb::sm::Subarray subarray(array->array_, layout, &g_helper_stats);
-  tiledb::sm::Range r;
-  r.set_str_range("cc", "ccd");
-  subarray.add_range(0, std::move(r), true);
-  ThreadPool tp;
-  CHECK(tp.init(4).ok());
+  tiledb::sm::Subarray subarray(
+      array->array_.get(), layout, &g_helper_stats, g_helper_logger());
+  CHECK(subarray.add_range(0, Range("cc", "ccd"), true).ok());
+  ThreadPool tp(4);
   Config config;
   SubarrayPartitioner partitioner(
       &config,
@@ -2559,7 +2560,8 @@ TEST_CASE_METHOD(
       memory_budget_var_,
       0,
       &tp,
-      &g_helper_stats);
+      &g_helper_stats,
+      g_helper_logger());
   auto st = partitioner.set_result_budget("d", 10, 4);
   CHECK(st.ok());
   CHECK(partitioner.get_result_budget("d", &budget_off, &budget_val).ok());

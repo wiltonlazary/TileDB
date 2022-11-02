@@ -1,7 +1,7 @@
 /*
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -25,11 +25,33 @@
 // clang-format is disabled on the first enum so that we can manually indent it
 // properly.
 // clang-format off
+/**
+ * NOTE: The values of these enums are serialized to the array schema and/or
+ * fragment metadata. Therefore, the values below should never change,
+ * otherwise backwards compatibility breaks.
+ */
 #ifdef TILEDB_QUERY_TYPE_ENUM
     /** Read query */
     TILEDB_QUERY_TYPE_ENUM(READ) = 0,
     /** Write query */
     TILEDB_QUERY_TYPE_ENUM(WRITE) = 1,
+    /** Delete query */
+    #if (defined(DELETE))
+    // note: 'DELETE' is #define'd somewhere within windows headers as
+    // something resolving to '(0x00010000L)', which causes problems with
+    // query_type.h which does not qualify the 'id' like tiledb.h does.
+    // #undef DELETE
+    #error "'DELETE' should not be defined before now in tiledb_enum.h.\nHas it seeped out from include of windows.h somewhere that needs changing?\n(Catch2 includes have been a past culprit.)\nFind error message in tiledb_enum.h for more information."
+    // If this is encountered 'too often', further consideration might be given to 
+    // simply qualifying the currently unqualified definition of TILEDB_QUERY_TYPE_ENUM in
+    // query_type.h so 'DELETE' and any other enum items here would not collide with this
+    // windows definition known to be in conflict.
+    #endif
+    TILEDB_QUERY_TYPE_ENUM(DELETE) = 2,
+    /** Update query */
+    TILEDB_QUERY_TYPE_ENUM(UPDATE) = 3,
+    /** Exclusive Modification query */
+    TILEDB_QUERY_TYPE_ENUM(MODIFY_EXCLUSIVE) = 4,
 #endif
 // clang-format on
 
@@ -41,19 +63,6 @@
     /** Array object */
     TILEDB_OBJECT_TYPE_ENUM(ARRAY) = 2,
 // We remove 3 (KEY_VALUE), so we should probably reserve it
-#endif
-
-#ifdef TILEDB_FILESYSTEM_ENUM
-    /** HDFS filesystem */
-    TILEDB_FILESYSTEM_ENUM(HDFS) = 0,
-    /** S3 filesystem */
-    TILEDB_FILESYSTEM_ENUM(S3) = 1,
-    /** Azure filesystem */
-    TILEDB_FILESYSTEM_ENUM(AZURE) = 2,
-    /** GCS filesystem */
-    TILEDB_FILESYSTEM_ENUM(GCS) = 3,
-    /** In-memory filesystem */
-    TILEDB_FILESYSTEM_ENUM(MEMFS) = 4,
 #endif
 
 #ifdef TILEDB_DATATYPE_ENUM
@@ -137,6 +146,10 @@
     TILEDB_DATATYPE_ENUM(TIME_FS) = 38,
     /** Time with attosecond resolution */
     TILEDB_DATATYPE_ENUM(TIME_AS) = 39,
+    /** std::byte */
+    TILEDB_DATATYPE_ENUM(BLOB) = 40,
+    /** Boolean */
+    TILEDB_DATATYPE_ENUM(BOOL) = 41,
 #endif
 
 #ifdef TILEDB_ARRAY_TYPE_ENUM
@@ -159,45 +172,6 @@
     TILEDB_LAYOUT_ENUM(HILBERT) = 4,
 #endif
 
-#ifdef TILEDB_FILTER_TYPE_ENUM
-    /** No-op filter */
-    TILEDB_FILTER_TYPE_ENUM(FILTER_NONE) = 0,
-    /** Gzip compressor */
-    TILEDB_FILTER_TYPE_ENUM(FILTER_GZIP) = 1,
-    /** Zstandard compressor */
-    TILEDB_FILTER_TYPE_ENUM(FILTER_ZSTD) = 2,
-    /** LZ4 compressor */
-    TILEDB_FILTER_TYPE_ENUM(FILTER_LZ4) = 3,
-    /** Run-length encoding compressor */
-    TILEDB_FILTER_TYPE_ENUM(FILTER_RLE) = 4,
-    /** Bzip2 compressor */
-    TILEDB_FILTER_TYPE_ENUM(FILTER_BZIP2) = 5,
-    /** Double-delta compressor */
-    TILEDB_FILTER_TYPE_ENUM(FILTER_DOUBLE_DELTA) = 6,
-    /** Bit width reduction filter. */
-    TILEDB_FILTER_TYPE_ENUM(FILTER_BIT_WIDTH_REDUCTION) = 7,
-    /** Bitshuffle filter. */
-    TILEDB_FILTER_TYPE_ENUM(FILTER_BITSHUFFLE) = 8,
-    /** Byteshuffle filter. */
-    TILEDB_FILTER_TYPE_ENUM(FILTER_BYTESHUFFLE) = 9,
-    /** Positive-delta encoding filter. */
-    TILEDB_FILTER_TYPE_ENUM(FILTER_POSITIVE_DELTA) = 10,
-    /** MD5 checksum filter. Starts at 12 because 11 is used for encryption, see
-       tiledb/sm/enums/filter_type.h */
-    TILEDB_FILTER_TYPE_ENUM(FILTER_CHECKSUM_MD5) = 12,
-    /** SHA256 checksum filter. */
-    TILEDB_FILTER_TYPE_ENUM(FILTER_CHECKSUM_SHA256) = 13,
-#endif
-
-#ifdef TILEDB_FILTER_OPTION_ENUM
-    /** Compression level. Type: `int32_t`. */
-    TILEDB_FILTER_OPTION_ENUM(COMPRESSION_LEVEL) = 0,
-    /** Max window length for bit width reduction. Type: `uint32_t`. */
-    TILEDB_FILTER_OPTION_ENUM(BIT_WIDTH_MAX_WINDOW) = 1,
-    /** Max window length for positive-delta encoding. Type: `uint32_t`. */
-    TILEDB_FILTER_OPTION_ENUM(POSITIVE_DELTA_MAX_WINDOW) = 2,
-#endif
-
 #ifdef TILEDB_ENCRYPTION_TYPE_ENUM
     /** No encryption. */
     TILEDB_ENCRYPTION_TYPE_ENUM(NO_ENCRYPTION) = 0,
@@ -216,6 +190,14 @@
     TILEDB_QUERY_STATUS_ENUM(INCOMPLETE) = 3,
     /** Query not initialized.  */
     TILEDB_QUERY_STATUS_ENUM(UNINITIALIZED) = 4,
+#endif
+
+#ifdef TILEDB_QUERY_STATUS_DETAILS_ENUM
+    TILEDB_QUERY_STATUS_DETAILS_ENUM(REASON_NONE) = 0,
+    /** User buffers are too small */
+    TILEDB_QUERY_STATUS_DETAILS_ENUM(REASON_USER_BUFFER_SIZE) = 1,
+    /** Exceeded memory budget: can resubmit without resize */
+    TILEDB_QUERY_STATUS_DETAILS_ENUM(REASON_MEMORY_BUDGET) = 2,
 #endif
 
 #ifdef TILEDB_QUERY_CONDITION_OP_ENUM
@@ -264,4 +246,13 @@
     TILEDB_VFS_MODE_ENUM(VFS_WRITE) = 1,
     /** Append mode */
     TILEDB_VFS_MODE_ENUM(VFS_APPEND) = 2,
+#endif
+
+#ifdef TILEDB_MIME_TYPE_ENUM
+    /** Unspecified MIME type*/
+    TILEDB_MIME_TYPE_ENUM(MIME_AUTODETECT) = 0,
+    /** image/tiff*/
+    TILEDB_MIME_TYPE_ENUM(MIME_TIFF) = 1,
+    /** application/pdf*/
+    TILEDB_MIME_TYPE_ENUM(MIME_PDF) = 2,
 #endif

@@ -33,7 +33,9 @@
 #ifndef TILEDB_CONTEXT_H
 #define TILEDB_CONTEXT_H
 
-#include "tiledb/common/status.h"
+#include "tiledb/common/exception/exception.h"
+#include "tiledb/common/thread_pool/thread_pool.h"
+#include "tiledb/sm/config/config.h"
 #include "tiledb/sm/stats/global_stats.h"
 #include "tiledb/sm/storage_manager/storage_manager.h"
 
@@ -41,40 +43,55 @@
 
 using namespace tiledb::common;
 
-namespace tiledb {
-namespace sm {
+namespace tiledb::sm {
 
 /**
  * This class manages the context for the C API, wrapping a
  * storage manager object.
- * */
+ */
 class Context {
  public:
   /* ********************************* */
   /*     CONSTRUCTORS & DESTRUCTORS    */
   /* ********************************* */
 
+  /**
+   * Default constructor is deleted.
+   */
+  Context() = delete;
+
   /** Constructor. */
-  Context();
+  explicit Context(const Config&);
 
   /** Destructor. */
-  ~Context();
+  ~Context() = default;
 
   /* ********************************* */
   /*                API                */
   /* ********************************* */
 
-  /** Initializes the context with the input config. */
-  Status init(Config* config);
-
   /** Returns the last error status. */
-  Status last_error();
+  optional<std::string> last_error();
 
-  /** Saves the input status. */
+  /**
+   * Saves a `Status` as the last error.
+   */
   void save_error(const Status& st);
 
-  /** Returns the storage manager. */
-  StorageManager* storage_manager() const;
+  /**
+   * Saves a `StatusException` as the last error.
+   */
+  void save_error(const StatusException& st);
+
+  /** Pointer to the underlying storage manager. */
+  inline StorageManager* storage_manager() {
+    return &storage_manager_;
+  }
+
+  /** Pointer to the underlying storage manager. */
+  inline const StorageManager* storage_manager() const {
+    return &storage_manager_;
+  }
 
   /** Returns the thread pool for compute-bound tasks. */
   ThreadPool* compute_tp() const;
@@ -91,13 +108,27 @@ class Context {
   /* ********************************* */
 
   /** The last error occurred. */
-  Status last_error_;
+  optional<std::string> last_error_{nullopt};
 
-  /** A mutex for thread-safety. */
+  /**
+   * Mutex protects access to `last_error_`.
+   */
   std::mutex mtx_;
 
-  /** The storage manager. */
-  StorageManager* storage_manager_;
+  /** The class logger. */
+  shared_ptr<Logger> logger_;
+
+  /** The class unique logger prefix */
+  inline static std::string logger_prefix_ =
+      std::to_string(std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count()) +
+      "-Context: ";
+
+  /**
+   * Counter for generating unique identifiers for `Logger` objects.
+   */
+  inline static std::atomic<uint64_t> logger_id_ = 0;
 
   /** The thread pool for compute-bound tasks. */
   mutable ThreadPool compute_tp_;
@@ -106,22 +137,57 @@ class Context {
   mutable ThreadPool io_tp_;
 
   /** The class stats. */
-  tdb_shared_ptr<stats::Stats> stats_;
+  shared_ptr<stats::Stats> stats_;
+
+  /**
+   * The storage manager.
+   */
+  StorageManager storage_manager_;
 
   /* ********************************* */
   /*         PRIVATE METHODS           */
   /* ********************************* */
 
   /**
-   * Initializes the thread pools.
+   * Get maximum number of threads to use in thread pools, based on config
+   * parameters.
+   *
+   * @param config The Config to look up max thread information from.
+   * @param max_thread_count (out) Variable to store max thread count.
+   * @return Status of request.
+   */
+  Status get_config_thread_count(
+      const Config& config, uint64_t& max_thread_count);
+
+  /**
+   * Get number of threads to use in compute thread pool, based on config
+   * parameters.  Will return the max of the configured value and the max thread
+   * count returned by get_max_thread_count()
+   *
+   * @param config The Config to look up the compute thread information from.
+   * @return Compute thread count.
+   */
+  size_t get_compute_thread_count(const Config& config);
+
+  /**
+   * Get number of threads to use in io thread pool, based on config
+   * parameters.  Will return the max of the configured value and the max thread
+   * count returned by get_max_thread_count()
+   *
+   * @param config The Config to look up the io thread information from.
+   * @return IO thread count.
+   */
+  size_t get_io_thread_count(const Config& config);
+
+  /**
+   * Initializes global and local logger.
    *
    * @param config The configuration parameters.
    * @return Status
    */
-  Status init_thread_pools(Config* config);
+  Status init_loggers(const Config& config);
 };
 
-}  // namespace sm
-}  // namespace tiledb
+}  // namespace tiledb::sm
 
 #endif  // TILEDB_CONTEXT_H

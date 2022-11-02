@@ -35,9 +35,11 @@
 
 #include <vector>
 
+#include "tiledb/common/common.h"
 #include "tiledb/common/status.h"
 #include "tiledb/sm/array_schema/domain.h"
 #include "tiledb/sm/misc/tile_overlap.h"
+#include "tiledb/storage_format/serialization/serializers.h"
 
 using namespace tiledb::common;
 
@@ -87,7 +89,7 @@ class RTree {
   /* ********************************* */
 
   /** Builds the RTree bottom-up on the current leaf level. */
-  Status build_tree();
+  void build_tree();
 
   /** Frees the memory associated with the rtree. */
   uint64_t free_memory();
@@ -96,7 +98,9 @@ class RTree {
   unsigned dim_num() const;
 
   /** Returns the domain. */
-  const Domain* domain() const;
+  inline const Domain* domain() const {
+    return domain_;
+  }
 
   /** Returns the fanout. */
   unsigned fanout() const;
@@ -105,7 +109,14 @@ class RTree {
    * Returns the tile overlap of the input range with the MBRs stored
    * in the RTree.
    */
-  TileOverlap get_tile_overlap(const NDRange& range) const;
+  TileOverlap get_tile_overlap(
+      const NDRange& range, std::vector<bool>& is_default) const;
+
+  /**
+   * Compute tile bitmap for the curent range.
+   */
+  void compute_tile_bitmap(
+      const Range& range, unsigned d, std::vector<uint8_t>* tile_bitmap) const;
 
   /** Returns the tree height. */
   unsigned height() const;
@@ -126,7 +137,15 @@ class RTree {
    * Serializes the contents of the object to the input buffer.
    * Note that `domain_` is not serialized in the buffer.
    */
-  Status serialize(Buffer* buff) const;
+  void serialize(Serializer& serializer) const;
+
+  /**
+   * Sets the RTree domain.
+   */
+  inline Status set_domain(const Domain* domain) {
+    domain_ = domain;
+    return Status::Ok();
+  }
 
   /**
    * Sets an MBR as a leaf in the tree. The function will error out
@@ -154,8 +173,8 @@ class RTree {
    * on the format version.
    * It also sets the input domain, as that is not serialized.
    */
-  Status deserialize(
-      ConstBuffer* cbuff, const Domain* domain, uint32_t version);
+  void deserialize(
+      Deserializer& deserializer, const Domain* domain, uint32_t version);
 
  private:
   /* ********************************* */
@@ -203,7 +222,12 @@ class RTree {
   /*         PRIVATE ATTRIBUTES        */
   /* ********************************* */
 
-  /** The domain. */
+  /**
+   * The domain for which this R-tree provides an index.
+   *
+   * This member variable can be changed to `const Domain&` after this class is
+   * C.41-compliant and its default constructor removed.
+   */
   const Domain* domain_;
 
   /** The fanout of the tree. */
@@ -238,7 +262,7 @@ class RTree {
    *
    * Applicable to versions 1-4
    */
-  Status deserialize_v1_v4(ConstBuffer* cbuff, const Domain* domain);
+  void deserialize_v1_v4(Deserializer& deserializer, const Domain* domain);
 
   /**
    * Deserializes the contents of the object from the input buffer based
@@ -247,7 +271,7 @@ class RTree {
    *
    * Applicable to versions >= 5
    */
-  Status deserialize_v5(ConstBuffer* cbuff, const Domain* domain);
+  void deserialize_v5(Deserializer& deserializer, const Domain* domain);
 
   /**
    * Swaps the contents (all field values) of this RTree with the

@@ -34,18 +34,18 @@
 #define TILEDB_AZURE_H
 
 #ifdef HAVE_AZURE
+#include "tiledb/common/common.h"
 #include "tiledb/common/status.h"
 #include "tiledb/common/thread_pool.h"
 #include "tiledb/sm/buffer/buffer.h"
 #include "tiledb/sm/config/config.h"
 #include "tiledb/sm/misc/constants.h"
-#include "tiledb/sm/misc/uri.h"
+#include "uri.h"
 
 #if !defined(NOMINMAX)
 #define NOMINMAX  // avoid min/max macros from windows headers
 #endif
 #include <base64.h>
-#include <blob/blob_client.h>
 #include <retry.h>
 #include <storage_account.h>
 #include <storage_credential.h>
@@ -57,9 +57,23 @@
 #undef TIME_MS
 #endif
 
+#ifdef DELETE
+#undef DELETE
+#endif
+
+// Forward declaration
+namespace azure::storage_lite {
+class blob_client;
+}
+
 using namespace tiledb::common;
 
 namespace tiledb {
+
+namespace common::filesystem {
+class directory_entry;
+}
+
 namespace sm {
 
 class Azure {
@@ -179,6 +193,21 @@ class Azure {
   Status ls(
       const URI& uri,
       std::vector<std::string>* paths,
+      const std::string& delimiter = "/",
+      int max_paths = -1) const;
+
+  /**
+   *
+   * Lists objects and object information that start with `uri`.
+   *
+   * @param uri The prefix URI.
+   * @param delimiter The uri is truncated to the first delimiter
+   * @param max_paths The maximum number of paths to be retrieved
+   * @return A list of directory_entry objects
+   */
+  tuple<Status, optional<std::vector<filesystem::directory_entry>>>
+  ls_with_sizes(
+      const URI& uri,
       const std::string& delimiter = "/",
       int max_paths = -1) const;
 
@@ -426,7 +455,7 @@ class Azure {
   ThreadPool* thread_pool_;
 
   /** The Azure blob storage client. */
-  tdb_shared_ptr<azure::storage_lite::blob_client> client_;
+  shared_ptr<azure::storage_lite::blob_client> client_;
 
   /** Maps a blob URI to an write cache buffer. */
   std::unordered_map<std::string, Buffer> write_cache_map_;

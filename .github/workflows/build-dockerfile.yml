@@ -1,10 +1,11 @@
 name: Build-Dockerfile
 
-on: pull_request
+on:
+  workflow_call:
 
 jobs:
   build-dockerfile:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
 
     steps:
       - name: Check out the repository

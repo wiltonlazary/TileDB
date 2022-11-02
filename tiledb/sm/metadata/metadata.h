@@ -38,9 +38,12 @@
 #include <mutex>
 #include <vector>
 
+#include "tiledb/common/common.h"
 #include "tiledb/common/heap_memory.h"
 #include "tiledb/common/status.h"
-#include "tiledb/sm/misc/uri.h"
+#include "tiledb/sm/filesystem/uri.h"
+#include "tiledb/sm/tile/tile.h"
+#include "tiledb/storage_format/serialization/serializers.h"
 
 using namespace tiledb::common;
 
@@ -87,10 +90,16 @@ class Metadata {
   /* ********************************* */
 
   /** Constructor. */
-  Metadata();
+  explicit Metadata();
+
+  /** Constructor. */
+  Metadata(const std::map<std::string, MetadataValue>& metadata_map);
 
   /** Copy constructor. */
   Metadata(const Metadata& rhs);
+
+  /** Copy assignment. */
+  Metadata& operator=(const Metadata& other);
 
   /** Destructor. */
   ~Metadata();
@@ -110,13 +119,14 @@ class Metadata {
 
   /**
    * Deserializes the input metadata buffers. Note that the buffers are
-   * assummed to be sorted on time. The function will take care of any
+   * assumed to be sorted on time. The function will take care of any
    * deleted or overwritten metadata items considering the order.
    */
-  Status deserialize(const std::vector<tdb_shared_ptr<Buffer>>& metadata_buffs);
+  static Metadata deserialize(
+      const std::vector<shared_ptr<Tile>>& metadata_tiles);
 
   /** Serializes all key-value metadata items into the input buffer. */
-  Status serialize(Buffer* buff) const;
+  void serialize(Serializer& serializer) const;
 
   /** Returns the timestamp range. */
   const std::pair<uint64_t, uint64_t>& timestamp_range() const;
@@ -149,10 +159,10 @@ class Metadata {
    * Gets a metadata item as a key-value pair.
    *
    * @param key The metadata key.
-   * @param value_type The datatype of the value.
-   * @param value_num The number of items in the value part (they could be more
-   * than one).
-   * @param value The metadata value. It will be `nullptr` if the key does
+   * @param[out] value_type The datatype of the value.
+   * @param[out] value_num The number of items in the value part (they could be
+   * more than one).
+   * @param[out] value The metadata value. It will be `nullptr` if the key does
    *     not exist
    * @return Status
    */
@@ -166,12 +176,12 @@ class Metadata {
    * Gets a metadata item as a key-value pair using an index.
    *
    * @param index The index used to retrieve the metadata.
-   * @param key The metadata key.
-   * @param key_len The metadata key length.
-   * @param value_type The datatype of the value.
-   * @param value_num The number of items in the value part (they could be more
-   * than one).
-   * @param value The metadata value. It will be `nullptr` if the key does
+   * @param[out] key The metadata key.
+   * @param[out] key_len The metadata key length.
+   * @param[out] value_type The datatype of the value.
+   * @param[out] value_num The number of items in the value part (they could be
+   * more than one).
+   * @param[out] value The metadata value. It will be `nullptr` if the key does
    *     not exist
    * @return Status
    */
@@ -201,7 +211,7 @@ class Metadata {
    * Sets the URIs of the metadata files that have been loaded
    * to this object.
    */
-  Status set_loaded_metadata_uris(
+  void set_loaded_metadata_uris(
       const std::vector<TimestampedURI>& loaded_metadata_uris);
 
   /**
@@ -219,6 +229,12 @@ class Metadata {
    * timestamp range is set to the current time.
    */
   void reset(uint64_t timestamp);
+
+  /**
+   * Clears the metadata and assigns the input timestamp to
+   * its timestamp range.
+   */
+  void reset(uint64_t timestamp_start, uint64_t timestamp_end);
 
   /** Returns an iterator to the beginning of the metadata. */
   iterator begin() const;

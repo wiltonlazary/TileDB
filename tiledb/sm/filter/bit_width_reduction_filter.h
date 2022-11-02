@@ -1,11 +1,11 @@
 /**
- * @file   reduce_type_width_filter.h
+ * @file   bit_width_reduction_filter.h
  *
  * @section LICENSE
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -85,6 +85,12 @@ class BitWidthReductionFilter : public Filter {
   /** Constructor. */
   BitWidthReductionFilter();
 
+  /** Constructor.
+   *
+   * @param max_window_size
+   */
+  BitWidthReductionFilter(uint32_t max_window_size);
+
   /** Dumps the filter details in ASCII format in the selected output. */
   void dump(FILE* out) const override;
 
@@ -95,6 +101,8 @@ class BitWidthReductionFilter : public Filter {
    * Reduce the bit size of the given input into the given output.
    */
   Status run_forward(
+      const Tile& tile,
+      Tile* const tile_offsets,
       FilterBuffer* input_metadata,
       FilterBuffer* input,
       FilterBuffer* output_metadata,
@@ -104,6 +112,8 @@ class BitWidthReductionFilter : public Filter {
    * Restore the bit size the given input into the given output.
    */
   Status run_reverse(
+      const Tile& tile,
+      Tile* const tile_offsets,
       FilterBuffer* input_metadata,
       FilterBuffer* input,
       FilterBuffer* output_metadata,
@@ -150,9 +160,6 @@ class BitWidthReductionFilter : public Filter {
   uint8_t compute_bits_required(
       ConstBuffer* buffer, uint32_t num_elements, T* min_value) const;
 
-  /** Deserializes this filter's metadata from the given buffer. */
-  Status deserialize_impl(ConstBuffer* buff) override;
-
   /** Gets an option from this filter. */
   Status get_option_impl(FilterOption option, void* value) const override;
 
@@ -173,6 +180,8 @@ class BitWidthReductionFilter : public Filter {
   /** Run_forward method templated on the tile cell datatype. */
   template <typename T>
   Status run_forward(
+      const Tile& tile,
+      Tile* const tile_offsets,
       FilterBuffer* input_metadata,
       FilterBuffer* input,
       FilterBuffer* output_metadata,
@@ -181,6 +190,8 @@ class BitWidthReductionFilter : public Filter {
   /** Run_reverse method templated on the tile cell datatype. */
   template <typename T>
   Status run_reverse(
+      const Tile& tile,
+      Tile* const tile_offsets,
       FilterBuffer* input_metadata,
       FilterBuffer* input,
       FilterBuffer* output_metadata,
@@ -190,7 +201,7 @@ class BitWidthReductionFilter : public Filter {
   Status set_option_impl(FilterOption option, const void* value) override;
 
   /** Serializes this filter's metadata to the given buffer. */
-  Status serialize_impl(Buffer* buff) const override;
+  void serialize_impl(Serializer& serializer) const override;
 
   /**
    * Writes the given value of type T to the given buffer after compressing

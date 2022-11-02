@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -35,6 +35,8 @@
 #include "tiledb/common/logger.h"
 #include "tiledb/sm/array/array.h"
 #include "tiledb/sm/array_schema/array_schema.h"
+#include "tiledb/sm/misc/tdb_time.h"
+#include "tiledb/sm/query/query_buffer.h"
 
 namespace tiledb {
 namespace sm {
@@ -45,6 +47,7 @@ namespace sm {
 
 StrategyBase::StrategyBase(
     stats::Stats* stats,
+    shared_ptr<Logger> logger,
     StorageManager* storage_manager,
     Array* array,
     Config& config,
@@ -52,17 +55,17 @@ StrategyBase::StrategyBase(
     Subarray& subarray,
     Layout layout)
     : stats_(stats)
+    , logger_(logger)
     , array_(array)
+    , array_schema_(array->array_schema_latest())
     , config_(config)
     , buffers_(buffers)
     , layout_(layout)
     , storage_manager_(storage_manager)
     , subarray_(subarray)
+    , offsets_format_mode_(Config::SM_OFFSETS_FORMAT_MODE)
     , offsets_extra_element_(false)
     , offsets_bitsize_(constants::cell_var_offset_size * 8) {
-  if (array != nullptr) {
-    array_schema_ = array->array_schema();
-  }
 }
 
 stats::Stats* StrategyBase::stats() const {
@@ -76,15 +79,15 @@ stats::Stats* StrategyBase::stats() const {
 void StrategyBase::get_dim_attr_stats() const {
   for (const auto& it : buffers_) {
     const auto& name = it.first;
-    auto var_size = array_schema_->var_size(name);
-    if (array_schema_->is_attr(name)) {
+    auto var_size = array_schema_.var_size(name);
+    if (array_schema_.is_attr(name)) {
       stats_->add_counter("attr_num", 1);
       if (var_size) {
         stats_->add_counter("attr_var_num", 1);
       } else {
         stats_->add_counter("attr_fixed_num", 1);
       }
-      if (array_schema_->is_nullable(name)) {
+      if (array_schema_.is_nullable(name)) {
         stats_->add_counter("attr_nullable_num", 1);
       }
     } else {
@@ -128,7 +131,7 @@ uint32_t StrategyBase::offsets_bitsize() const {
 
 Status StrategyBase::set_offsets_bitsize(const uint32_t bitsize) {
   if (bitsize != 32 && bitsize != 64) {
-    return LOG_STATUS(Status::ReaderError(
+    return logger_->status(Status_ReaderError(
         "Cannot set offset bitsize to " + std::to_string(bitsize) +
         "; Only 32 and 64 are acceptable bitsize values"));
   }

@@ -42,7 +42,7 @@ namespace sm {
 /** Defines a filesystem. */
 enum class Filesystem : uint8_t {
 #define TILEDB_FILESYSTEM_ENUM(id) id
-#include "tiledb/sm/c_api/tiledb_enum.h"
+#include "tiledb/api/c_api/filesystem/filesystem_api_enum.h"
 #undef TILEDB_FILESYSTEM_ENUM
 };
 
@@ -78,7 +78,7 @@ inline Status filesystem_enum(
   else if (filesystem_type_str == constants::filesystem_type_mem_str)
     *filesystem_type = Filesystem::MEMFS;
   else
-    return Status::Error("Invalid Filesystem " + filesystem_type_str);
+    return Status_Error("Invalid Filesystem " + filesystem_type_str);
 
   return Status::Ok();
 }

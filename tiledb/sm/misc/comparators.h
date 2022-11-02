@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB, Inc.
  * @copyright Copyright (c) 2016 MIT and Intel Corporation
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -40,20 +40,69 @@
 
 #include "tiledb/sm/array_schema/domain.h"
 #include "tiledb/sm/enums/layout.h"
-#include "tiledb/sm/query/result_coords.h"
+#include "tiledb/sm/query/readers/result_coords.h"
+#include "tiledb/sm/query/readers/sparse_global_order_reader.h"
+#include "tiledb/sm/query/writers/domain_buffer.h"
 
 using namespace tiledb::common;
 
-namespace tiledb {
-namespace sm {
+namespace tiledb::sm {
+
+class CellCmpBase {
+ protected:
+  /** The domain. */
+  const Domain& domain_;
+
+  /** The number of dimensions. */
+  unsigned dim_num_;
+
+  /** Use timestamps or not during comparison. */
+  bool use_timestamps_;
+
+  /** Pointer to access fragment metadata. */
+  const std::vector<shared_ptr<FragmentMetadata>>* frag_md_;
+
+ public:
+  explicit CellCmpBase(
+      const Domain& domain,
+      const bool use_timestamps = false,
+      const std::vector<shared_ptr<FragmentMetadata>>* frag_md = nullptr)
+      : domain_(domain)
+      , dim_num_(domain.dim_num())
+      , use_timestamps_(use_timestamps)
+      , frag_md_(frag_md) {
+  }
+
+  template <class RCType>
+  [[nodiscard]] int cell_order_cmp_RC(
+      unsigned int d, const RCType& a, const RCType& b) const {
+    const auto& dim{*(domain_.dimension_ptr(d))};
+    auto v1{a.dimension_datum(dim, d)};
+    auto v2{b.dimension_datum(dim, d)};
+    return domain_.cell_order_cmp(d, v1, v2);
+  }
+
+  template <class RCType>
+  uint64_t get_timestamp(const RCType& rc) const {
+    const auto f = rc.tile_->frag_idx();
+    if ((*frag_md_)[f]->has_timestamps()) {
+      return rc.tile_->timestamp(rc.pos_);
+    } else {
+      return (*frag_md_)[f]->timestamp_range().first;
+    }
+  }
+
+  inline void use_timestamps(bool enable) {
+    use_timestamps_ = enable;
+  }
+};
 
 /** Wrapper of comparison function for sorting coords on row-major order. */
-class RowCmp {
+class RowCmp : CellCmpBase {
  public:
   /** Constructor. */
-  RowCmp(const Domain* domain)
-      : domain_(domain)
-      , dim_num_(domain->dim_num()) {
+  explicit RowCmp(const Domain& domain)
+      : CellCmpBase(domain) {
   }
 
   /**
@@ -65,7 +114,7 @@ class RowCmp {
    */
   bool operator()(const ResultCoords& a, const ResultCoords& b) const {
     for (unsigned int d = 0; d < dim_num_; ++d) {
-      auto res = domain_->cell_order_cmp(d, a, b);
+      auto res = cell_order_cmp_RC(d, a, b);
 
       if (res == -1)
         return true;
@@ -76,21 +125,14 @@ class RowCmp {
 
     return false;
   }
-
- private:
-  /** The domain. */
-  const Domain* domain_;
-  /** The number of dimensions. */
-  unsigned dim_num_;
 };
 
 /** Wrapper of comparison function for sorting coords on col-major order. */
-class ColCmp {
+class ColCmp : CellCmpBase {
  public:
   /** Constructor. */
-  ColCmp(const Domain* domain)
-      : domain_(domain)
-      , dim_num_(domain->dim_num()) {
+  explicit ColCmp(const Domain& domain)
+      : CellCmpBase(domain) {
   }
 
   /**
@@ -102,7 +144,7 @@ class ColCmp {
    */
   bool operator()(const ResultCoords& a, const ResultCoords& b) const {
     for (unsigned int d = dim_num_ - 1;; --d) {
-      auto res = domain_->cell_order_cmp(d, a, b);
+      auto res = cell_order_cmp_RC(d, a, b);
 
       if (res == -1)
         return true;
@@ -116,64 +158,115 @@ class ColCmp {
 
     return false;
   }
-
- private:
-  /** The domain. */
-  const Domain* domain_;
-  /** The number of dimensions. */
-  unsigned dim_num_;
 };
 
 /** Wrapper of comparison function for sorting coords on Hilbert values. */
-class HilbertCmp {
+class HilbertCmp : public CellCmpBase {
  public:
   /** Constructor. */
   HilbertCmp(
-      const Domain* domain,
-      const std::vector<const QueryBuffer*>* buffs,
-      const std::vector<uint64_t>* hilbert_values)
-      : buffs_(buffs)
-      , domain_(domain)
-      , hilbert_values_(hilbert_values) {
-    dim_num_ = domain->dim_num();
-  }
-
-  /** Constructor. */
-  HilbertCmp(
-      const Domain* domain, std::vector<ResultCoords>::iterator iter_begin)
-      : domain_(domain)
-      , iter_begin_(iter_begin) {
-    dim_num_ = domain->dim_num();
-  }
-
-  /** Constructor. */
-  HilbertCmp(
-      const Domain* domain,
-      std::vector<std::vector<uint64_t>>* fragments_hilbert_values)
-      : domain_(domain)
-      , fragment_hilbert_values_(fragments_hilbert_values) {
-    dim_num_ = domain->dim_num();
+      const Domain& domain,
+      const bool use_timestamps = false,
+      const std::vector<shared_ptr<FragmentMetadata>>* frag_md = nullptr)
+      : CellCmpBase(domain, use_timestamps, frag_md) {
   }
 
   /**
    * Positional comparison operator.
    *
-   * @param a The first cell position.
-   * @param b The second cell position.
-   * @return `true` if cell at `a` precedes
-   *     cell at `b` on the hilbert value, and `false` otherwise.
+   * @param a The first coordinate.
+   * @param b The second coordinate.
+   * @return `true` if `a` precedes `b` and `false` otherwise.
    */
-  bool operator()(uint64_t a, uint64_t b) const {
-    assert(hilbert_values_ != nullptr);
-    if ((*hilbert_values_)[a] < (*hilbert_values_)[b])
+  template <class BitmapType>
+  bool operator()(
+      const GlobalOrderResultCoords<BitmapType>& a,
+      const GlobalOrderResultCoords<BitmapType>& b) const {
+    auto hilbert_a = a.tile_->hilbert_value(a.pos_);
+    auto hilbert_b = b.tile_->hilbert_value(b.pos_);
+    if (hilbert_a < hilbert_b)
       return true;
-    else if ((*hilbert_values_)[a] > (*hilbert_values_)[b])
+    else if (hilbert_a > hilbert_b)
       return false;
     // else the hilbert values are equal
 
-    // Compare cell order
-    auto cell_cmp = domain_->cell_order_cmp(*buffs_, a, b);
-    return cell_cmp == -1;
+    // Compare cell order on row-major to break the tie
+    for (unsigned d = 0; d < dim_num_; ++d) {
+      auto res = cell_order_cmp_RC(d, a, b);
+      if (res == -1)
+        return true;
+      if (res == 1)
+        return false;
+      // else same tile on dimension d --> continue
+    }
+
+    // Compare timestamps
+    if (use_timestamps_ && get_timestamp(a) > get_timestamp(b)) {
+      return true;
+    }
+
+    return false;
+  }
+};
+
+/**
+ * Wrapper of comparison function for sorting coords on Hilbert values
+ * in reverse order.
+ */
+class HilbertCmpReverse {
+ public:
+  /**
+   * Constructor.
+   *
+   * @param domain The array domain.
+   * @param use_timestamps Use timestamps or not for this comparator.
+   * @param frag_md Pointer to the fragment metadata.
+   */
+  HilbertCmpReverse(
+      const Domain& domain,
+      const bool use_timestamps = false,
+      const std::vector<shared_ptr<FragmentMetadata>>* frag_md = nullptr)
+      : cmp_(domain, use_timestamps, frag_md) {
+  }
+
+  /**
+   * Comparison operator for a vector of `ResultCoords`.
+   *
+   * @param a The first coordinate.
+   * @param b The second coordinate.
+   * @return `true` if `a` precedes `b` and `false` otherwise.
+   */
+  template <class RCType>
+  bool operator()(const RCType& a, const RCType& b) const {
+    return !cmp_.operator()(a, b);
+  }
+
+  inline void use_timestamps(bool enable) {
+    cmp_.use_timestamps(enable);
+  }
+
+ private:
+  /** HilbertCmp. */
+  HilbertCmp cmp_;
+};
+
+/**
+ * (Hilbert) comparison (Cmp) function class on domain values retrieved with a
+ * `ResultCoords` iterator (RCI).
+ */
+class HilbertCmpRCI : protected CellCmpBase {
+  /**
+   * Start iterator of result coords vector.
+   */
+  const std::vector<ResultCoords>::iterator& iter_begin_;
+
+ public:
+  /** Constructor. */
+  HilbertCmpRCI(
+      const Domain& domain,
+      const std::vector<ResultCoords>::iterator& iter_begin)
+      : CellCmpBase(domain)
+      , iter_begin_(iter_begin) {
   }
 
   /**
@@ -187,7 +280,6 @@ class HilbertCmp {
   bool operator()(
       const std::pair<uint64_t, uint64_t>& a,
       const std::pair<uint64_t, uint64_t>& b) const {
-    assert(hilbert_values_ != nullptr);
     if (a.first < b.first)
       return true;
     else if (a.first > b.first)
@@ -198,7 +290,7 @@ class HilbertCmp {
     const auto& a_coord = *(iter_begin_ + a.second);
     const auto& b_coord = *(iter_begin_ + b.second);
     for (unsigned d = 0; d < dim_num_; ++d) {
-      auto res = domain_->cell_order_cmp(d, a_coord, b_coord);
+      auto res = cell_order_cmp_RC(d, a_coord, b_coord);
       if (res == -1)
         return true;
       if (res == 1)
@@ -208,140 +300,27 @@ class HilbertCmp {
 
     return false;
   }
-
-  /**
-   * Positional comparison operator.
-   *
-   * @param a The first coordinate.
-   * @param b The second coordinate.
-   * @return `true` if `a` precedes `b` and `false` otherwise.
-   */
-  bool operator()(const ResultCoords& a, const ResultCoords& b) const {
-    auto hilbert_a = (*fragment_hilbert_values_)[a.tile_->frag_idx()][a.pos_];
-    auto hilbert_b = (*fragment_hilbert_values_)[b.tile_->frag_idx()][b.pos_];
-    if (hilbert_a < hilbert_b)
-      return true;
-    else if (hilbert_a > hilbert_b)
-      return false;
-    // else the hilbert values are equal
-
-    // Compare cell order on row-major to break the tie
-    for (unsigned d = 0; d < dim_num_; ++d) {
-      auto res = domain_->cell_order_cmp(d, a, b);
-      if (res == -1)
-        return true;
-      if (res == 1)
-        return false;
-      // else same tile on dimension d --> continue
-    }
-
-    return false;
-  }
-
-  /**
-   * Sets the values for the coordinates comparator.
-   *
-   * @param f The fragment index.
-   * @param v The values vector for the tile in process.
-   */
-  void set_values_for_fragment(unsigned int f, std::vector<uint64_t>& v) {
-    (*fragment_hilbert_values_)[f] = std::move(v);
-  }
-
- private:
-  /**
-   * The coordinate buffers, one per dimension, sorted in the order the
-   * dimensions are defined in the array schema.
-   */
-  const std::vector<const QueryBuffer*>* buffs_;
-  /** The array domain. */
-  const Domain* domain_;
-  /** The number of dimensions. */
-  unsigned dim_num_;
-  /** Start iterator of result coords vector. */
-  std::vector<ResultCoords>::iterator iter_begin_;
-  /** The Hilbert values vector. */
-  const std::vector<uint64_t>* hilbert_values_;
-  /** The Hilbert values vectors per fragments. */
-  std::vector<std::vector<uint64_t>>* fragment_hilbert_values_;
-};
-
-/**
- * Wrapper of comparison function for sorting coords on Hilbert values
- * in reverse order.
- */
-class HilbertCmpReverse {
- public:
-  /**
-   * Constructor.
-   *
-   * @param domain The array domain.
-   * @param buff The buffer containing the actual values, used
-   *     in positional comparisons.
-   */
-  HilbertCmpReverse(
-      const Domain* domain,
-      std::vector<std::vector<uint64_t>>* fragments_hilbert_values)
-      : cmp_(domain, fragments_hilbert_values) {
-  }
-
-  /**
-   * Comparison operator for a vector of `ResultCoords`.
-   *
-   * @param a The first coordinate.
-   * @param b The second coordinate.
-   * @return `true` if `a` precedes `b` and `false` otherwise.
-   */
-  bool operator()(const ResultCoords& a, const ResultCoords& b) const {
-    return !cmp_.operator()(a, b);
-  }
-
-  /**
-   * Sets the values for the coordinates comparator.
-   *
-   * @param f The fragment index.
-   * @param v The values vector for the tile in process.
-   * @return `true` if `a` precedes `b` and `false` otherwise.
-   */
-  void set_values_for_fragment(unsigned int f, std::vector<uint64_t>& v) {
-    cmp_.set_values_for_fragment(f, v);
-  }
-
- private:
-  /** HilbertCmp. */
-  HilbertCmp cmp_;
 };
 
 /**
  * Wrapper of comparison function for sorting coords on the global order
  * of some domain.
  */
-class GlobalCmp {
+class GlobalCmp : public CellCmpBase {
  public:
   /**
    * Constructor.
    *
    * @param domain The array domain.
-   * @param buff The buffer containing the actual values, used
-   *     in positional comparisons.
+   * @param frag_md Pointer to the fragment metadata.
    */
-  GlobalCmp(const Domain* domain)
-      : domain_(domain) {
-    dim_num_ = domain->dim_num();
-    tile_order_ = domain->tile_order();
-    cell_order_ = domain->cell_order();
-    buffs_ = nullptr;
-  }
-
-  /**
-   * Constructor.
-   *
-   * @param domain The array domain.
-   * @param buffs The coordinate query buffers, one per dimension.
-   */
-  GlobalCmp(const Domain* domain, const std::vector<const QueryBuffer*>* buffs)
-      : domain_(domain)
-      , buffs_(buffs) {
+  explicit GlobalCmp(
+      const Domain& domain,
+      const bool use_timestamps = false,
+      const std::vector<shared_ptr<FragmentMetadata>>* frag_md = nullptr)
+      : CellCmpBase(domain, use_timestamps, frag_md) {
+    tile_order_ = domain.tile_order();
+    cell_order_ = domain.cell_order();
   }
 
   /**
@@ -351,14 +330,15 @@ class GlobalCmp {
    * @param b The second coordinate.
    * @return `true` if `a` precedes `b` and `false` otherwise.
    */
-  bool operator()(const ResultCoords& a, const ResultCoords& b) const {
+  template <class RCType>
+  bool operator()(const RCType& a, const RCType& b) const {
     if (tile_order_ == Layout::ROW_MAJOR) {
       for (unsigned d = 0; d < dim_num_; ++d) {
         // Not applicable to var-sized dimensions
-        if (domain_->dimension(d)->var_size())
+        if (domain_.dimension_ptr(d)->var_size())
           continue;
 
-        auto res = domain_->tile_order_cmp(d, a.coord(d), b.coord(d));
+        auto res = domain_.tile_order_cmp(d, a.coord(d), b.coord(d));
 
         if (res == -1)
           return true;
@@ -368,28 +348,25 @@ class GlobalCmp {
       }
     } else {  // COL_MAJOR
       assert(tile_order_ == Layout::COL_MAJOR);
-      for (unsigned d = dim_num_ - 1;; --d) {
+      for (int32_t d = static_cast<int32_t>(dim_num_) - 1; d >= 0; d--) {
         // Not applicable to var-sized dimensions
-        if (domain_->dimension(d)->var_size())
+        if (domain_.dimension_ptr(d)->var_size())
           continue;
 
-        auto res = domain_->tile_order_cmp(d, a.coord(d), b.coord(d));
+        auto res = domain_.tile_order_cmp(d, a.coord(d), b.coord(d));
 
         if (res == -1)
           return true;
         if (res == 1)
           return false;
         // else same tile on dimension d --> continue
-
-        if (d == 0)
-          break;
       }
     }
 
     // Compare cell order
     if (cell_order_ == Layout::ROW_MAJOR) {
       for (unsigned d = 0; d < dim_num_; ++d) {
-        auto res = domain_->cell_order_cmp(d, a, b);
+        auto res = cell_order_cmp_RC(d, a, b);
 
         if (res == -1)
           return true;
@@ -399,60 +376,30 @@ class GlobalCmp {
       }
     } else {  // COL_MAJOR
       assert(cell_order_ == Layout::COL_MAJOR);
-      for (unsigned d = dim_num_ - 1;; --d) {
-        auto res = domain_->cell_order_cmp(d, a, b);
+      for (int32_t d = static_cast<int32_t>(dim_num_) - 1; d >= 0; d--) {
+        auto res = cell_order_cmp_RC(d, a, b);
 
         if (res == -1)
           return true;
         if (res == 1)
           return false;
         // else same tile on dimension d --> continue
-
-        if (d == 0)
-          break;
       }
+    }
+
+    // Compare timestamps
+    if (use_timestamps_ && get_timestamp(a) > get_timestamp(b)) {
+      return true;
     }
 
     return false;
   }
 
-  /**
-   * Positional comparison operator.
-   *
-   * @param a The first cell position.
-   * @param b The second cell position.
-   * @return `true` if cell at `a` across all coordinate buffers precedes
-   *     cell at `b`, and `false` otherwise.
-   */
-  bool operator()(uint64_t a, uint64_t b) const {
-    assert(buffs_ != nullptr);
-    auto tile_cmp = domain_->tile_order_cmp(*buffs_, a, b);
-
-    if (tile_cmp == -1)
-      return true;
-    if (tile_cmp == 1)
-      return false;
-    // else tile_cmp == 0 --> continue
-
-    // Compare cell order
-    auto cell_cmp = domain_->cell_order_cmp(*buffs_, a, b);
-    return cell_cmp == -1;
-  }
-
  private:
-  /** The domain. */
-  const Domain* domain_;
-  /** The number of dimensions. */
-  unsigned dim_num_;
   /** The tile order. */
   Layout tile_order_;
   /** The cell order. */
   Layout cell_order_;
-  /**
-   * The coordinate buffers, one per dimension, sorted in the order the
-   * dimensions are defined in the array schema.
-   */
-  const std::vector<const QueryBuffer*>* buffs_;
 };
 
 /**
@@ -465,11 +412,14 @@ class GlobalCmpReverse {
    * Constructor.
    *
    * @param domain The array domain.
-   * @param buff The buffer containing the actual values, used
-   *     in positional comparisons.
+   * @param use_timestamps Use timestamps or not for this comparator.
+   * @param frag_md Pointer to the fragment metadata.
    */
-  GlobalCmpReverse(const Domain* domain)
-      : cmp_(domain) {
+  explicit GlobalCmpReverse(
+      const Domain& domain,
+      const bool use_timestamps = false,
+      const std::vector<shared_ptr<FragmentMetadata>>* frag_md = nullptr)
+      : cmp_(domain, use_timestamps, frag_md) {
   }
 
   /**
@@ -479,8 +429,13 @@ class GlobalCmpReverse {
    * @param b The second coordinate.
    * @return `true` if `a` precedes `b` and `false` otherwise.
    */
-  bool operator()(const ResultCoords& a, const ResultCoords& b) const {
+  template <class RCType>
+  bool operator()(const RCType& a, const RCType& b) const {
     return !cmp_.operator()(a, b);
+  }
+
+  inline void use_timestamps(bool enable) {
+    cmp_.use_timestamps(enable);
   }
 
  private:
@@ -488,7 +443,131 @@ class GlobalCmpReverse {
   GlobalCmp cmp_;
 };
 
-}  // namespace sm
-}  // namespace tiledb
+/**
+ * Base class for comparison function classes whose operands are domain values
+ * residing in QueryBuffer objects.
+ */
+class DomainValueCmpBaseQB {
+ protected:
+  /**
+   * The type of a domain, currently accessed through Domain object.
+   */
+  const Domain& domain_;
+
+  /**
+   * A view into a set of buffers for the domain.
+   */
+  const DomainBuffersView& db_;
+
+  /**
+   * Constructor.
+   *
+   * @param domain A domain of an array
+   * @param buffs Coordinate query buffers, one per dimension of the array.
+   */
+  DomainValueCmpBaseQB(const Domain& domain, const DomainBuffersView& db)
+      : domain_(domain)
+      , db_(db) {
+  }
+
+  [[nodiscard]] DomainBufferDataRef domain_ref_at(size_t k) const {
+    return db_.domain_ref_at(domain_, k);
+  }
+};
+
+/**
+ * (Global) Comparsion (Cmp) function class that operates on values that
+ * reside in QueryBuffers (QB) for a domain.
+ */
+class GlobalCmpQB : protected DomainValueCmpBaseQB {
+ public:
+  /// Default constructor is prohibited.
+  GlobalCmpQB() = delete;
+
+  /**
+   * Constructor.
+   *
+   * @param domain The array domain.
+   * @param buffs The coordinate query buffers, one per dimension.
+   */
+  GlobalCmpQB(const Domain& domain, const DomainBuffersView& db)
+      : DomainValueCmpBaseQB(domain, db) {
+  }
+
+  /**
+   * Positional comparison operator.
+   *
+   * @param a The first cell position.
+   * @param b The second cell position.
+   * @return `true` if cell at `a` across all coordinate buffers precedes
+   *     cell at `b`, and `false` otherwise.
+   */
+  bool operator()(uint64_t a, uint64_t b) const {
+    auto left{domain_ref_at(a)};
+    auto right{domain_ref_at(b)};
+    auto tile_cmp = domain_.tile_order_cmp(left, right);
+
+    if (tile_cmp == -1)
+      return true;
+    if (tile_cmp == 1)
+      return false;
+    // else tile_cmp == 0 --> continue
+
+    // Compare cell order
+    auto cell_cmp = domain_.cell_order_cmp(left, right);
+    return cell_cmp == -1;
+  }
+};
+
+/**
+ * (Hilbert) Comparsion (Cmp) function class that operates on values that
+ * reside in QueryBuffers (QB) for a domain.
+ */
+class HilbertCmpQB : protected DomainValueCmpBaseQB {
+  /**
+   * The Hilbert values vector.
+   */
+  const std::vector<uint64_t>& hilbert_values_;
+
+ public:
+  /// Default constructor is prohibited.
+  HilbertCmpQB() = delete;
+
+  /**
+   * Constructor.
+   */
+  HilbertCmpQB(
+      const Domain& domain,
+      const DomainBuffersView& domain_buffers,
+      const std::vector<uint64_t>& hilbert_values)
+      : DomainValueCmpBaseQB(domain, domain_buffers)
+      , hilbert_values_(hilbert_values) {
+  }
+
+  /**
+   * Positional comparison operator.
+   *
+   * @param a The first cell position.
+   * @param b The second cell position.
+   * @return `true` if cell at `a` precedes
+   *     cell at `b` on the hilbert value, and `false` otherwise.
+   */
+  bool operator()(uint64_t a, uint64_t b) const {
+    if (hilbert_values_[a] < hilbert_values_[b]) {
+      return true;
+    } else if (hilbert_values_[a] > hilbert_values_[b]) {
+      return false;
+    }
+    // Assert: The hilbert values are equal
+
+    // Compare cell order
+    auto left{domain_ref_at(a)};
+    auto right{domain_ref_at(b)};
+    auto cell_cmp = domain_.cell_order_cmp(left, right);
+    return cell_cmp == -1;
+  }
+};
+
+}  // namespace tiledb::sm
 
 #endif  // TILEDB_COMPARATORS_H

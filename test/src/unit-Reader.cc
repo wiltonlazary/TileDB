@@ -30,11 +30,17 @@
  * Tests the `Reader` class.
  */
 
-#include "test/src/helpers.h"
-#include "test/src/vfs_helpers.h"
+#include "test/support/src/helpers.h"
+#include "test/support/src/vfs_helpers.h"
+#include "tiledb/common/common.h"
+#include "tiledb/common/dynamic_memory/dynamic_memory.h"
+#include "tiledb/common/heap_memory.h"
+#include "tiledb/common/logger.h"
 #include "tiledb/sm/c_api/tiledb_struct_def.h"
+#include "tiledb/sm/enums/encryption_type.h"
 #include "tiledb/sm/misc/types.h"
-#include "tiledb/sm/query/reader.h"
+#include "tiledb/sm/query/legacy/reader.h"
+#include "tiledb/type/range/range.h"
 
 #ifdef _WIN32
 #include "tiledb/sm/filesystem/win.h"
@@ -42,10 +48,11 @@
 #include "tiledb/sm/filesystem/posix.h"
 #endif
 
-#include <catch.hpp>
+#include <test/support/tdb_catch.h>
 #include <iostream>
 
 using namespace tiledb::sm;
+using namespace tiledb::type;
 using namespace tiledb::test;
 
 /* ********************************* */
@@ -82,12 +89,53 @@ ReaderFx::ReaderFx()
   create_dir(temp_dir_, ctx_, vfs_);
 
   array_name_ = temp_dir_ + ARRAY_NAME;
-  int rc = tiledb_array_alloc(ctx_, array_name_.c_str(), &array_);
+
+  int64_t dim_domain[] = {-1, 2};
+  int64_t tile_extent = 2;
+
+  // Create domain
+  tiledb_domain_t* domain;
+  auto rc = tiledb_domain_alloc(ctx_, &domain);
+  REQUIRE(rc == TILEDB_OK);
+  tiledb_dimension_t* dim;
+  rc = tiledb_dimension_alloc(
+      ctx_, "d1", TILEDB_INT64, dim_domain, &tile_extent, &dim);
+  REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_domain_add_dimension(ctx_, domain, dim);
+  REQUIRE(rc == TILEDB_OK);
+
+  // Create attribute
+  tiledb_attribute_t* attr;
+  rc = tiledb_attribute_alloc(ctx_, "a", TILEDB_INT32, &attr);
+  REQUIRE(rc == TILEDB_OK);
+
+  // Create array schema
+  tiledb_array_schema_t* array_schema;
+  rc = tiledb_array_schema_alloc(ctx_, TILEDB_SPARSE, &array_schema);
+  REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_array_schema_set_cell_order(ctx_, array_schema, TILEDB_ROW_MAJOR);
+  REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_array_schema_set_tile_order(ctx_, array_schema, TILEDB_ROW_MAJOR);
+  REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_array_schema_set_domain(ctx_, array_schema, domain);
+  REQUIRE(rc == TILEDB_OK);
+  rc = tiledb_array_schema_add_attribute(ctx_, array_schema, attr);
+  REQUIRE(rc == TILEDB_OK);
+
+  rc = tiledb_array_schema_check(ctx_, array_schema);
+  REQUIRE(rc == TILEDB_OK);
+
+  // Create array
+  rc = tiledb_array_create(ctx_, array_name_.c_str(), array_schema);
+  REQUIRE(rc == TILEDB_OK);
+  tiledb_attribute_free(&attr);
+  tiledb_dimension_free(&dim);
+  tiledb_domain_free(&domain);
+  tiledb_array_schema_free(&array_schema);
   CHECK(rc == TILEDB_OK);
 }
 
 ReaderFx::~ReaderFx() {
-  tiledb_array_free(&array_);
   remove_dir(temp_dir_, ctx_, vfs_);
   tiledb_ctx_free(&ctx_);
   tiledb_vfs_free(&vfs_);
@@ -101,14 +149,23 @@ TEST_CASE_METHOD(
     ReaderFx,
     "Reader: Compute result space tiles, 2D",
     "[Reader][2d][compute_result_space_tiles]") {
+  uint64_t tmp_size = 0;
   Config config;
+  Context context(config);
   std::unordered_map<std::string, tiledb::sm::QueryBuffer> buffers;
-  Subarray subarray;
+  buffers.emplace(
+      "a", tiledb::sm::QueryBuffer(nullptr, nullptr, &tmp_size, &tmp_size));
   QueryCondition condition;
+  ThreadPool tp_cpu(4), tp_io(4);
+  Array array(URI(array_name_), context.storage_manager());
+  CHECK(array.open(QueryType::READ, EncryptionType::NO_ENCRYPTION, nullptr, 0)
+            .ok());
+  Subarray subarray(&array, &g_helper_stats, g_helper_logger());
   Reader reader(
       &g_helper_stats,
-      nullptr,
-      nullptr,
+      g_helper_logger(),
+      context.storage_manager(),
+      &array,
       config,
       buffers,
       subarray,
@@ -174,35 +231,51 @@ TEST_CASE_METHOD(
       UINT32_MAX, domain, dsd, tile_extents, layout);
 
   Dimension d1("d1", Datatype::INT32);
-  d1.set_domain(domain_vec);
-  d1.set_tile_extent(&tile_extents_vec[0]);
+  CHECK(d1.set_domain(domain_vec).ok());
+  CHECK(d1.set_tile_extent(&tile_extents_vec[0]).ok());
   Dimension d2("d2", Datatype::INT32);
-  d2.set_domain(&domain_vec[2]);
-  d2.set_tile_extent(&tile_extents_vec[1]);
+  CHECK(d2.set_domain(&domain_vec[2]).ok());
+  CHECK(d2.set_tile_extent(&tile_extents_vec[1]).ok());
   Domain dom;
-  CHECK(dom.add_dimension(&d1).ok());
-  CHECK(dom.add_dimension(&d2).ok());
+  CHECK(dom.add_dimension(make_shared<Dimension>(HERE(), &d1)).ok());
+  CHECK(dom.add_dimension(make_shared<Dimension>(HERE(), &d2)).ok());
+
+  auto schema = make_shared<ArraySchema>(HERE());
+  CHECK(schema->set_domain(make_shared<Domain>(HERE(), &dom)).ok());
+
+  std::vector<shared_ptr<FragmentMetadata>> fragments;
+  for (uint64_t i = 0; i < frag_tile_domains.size() + 1; i++) {
+    shared_ptr<FragmentMetadata> fragment = make_shared<FragmentMetadata>(
+        HERE(),
+        nullptr,
+        nullptr,
+        schema,
+        URI(),
+        std::make_pair<uint64_t, uint64_t>(0, 0),
+        true);
+    fragments.emplace_back(std::move(fragment));
+  }
 
   // Compute result space tiles map
   std::map<const int32_t*, ResultSpaceTile<int32_t>> result_space_tiles;
   Reader::compute_result_space_tiles<int32_t>(
-      &dom,
+      fragments,
       tile_coords,
       array_tile_domain,
       frag_tile_domains,
-      &result_space_tiles);
+      result_space_tiles);
   CHECK(result_space_tiles.size() == 6);
 
   // Result tiles for fragment #1
-  ResultTile result_tile_1_0_1(1, 0, &dom);
-  ResultTile result_tile_1_2_1(1, 2, &dom);
+  ResultTile result_tile_1_0_1(1, 0, *(schema.get()));
+  ResultTile result_tile_1_2_1(1, 2, *(schema.get()));
 
   // Result tiles for fragment #2
-  ResultTile result_tile_1_0_2(2, 0, &dom);
+  ResultTile result_tile_1_0_2(2, 0, *(schema.get()));
 
   // Result tiles for fragment #3
-  ResultTile result_tile_2_0_3(3, 0, &dom);
-  ResultTile result_tile_3_0_3(3, 2, &dom);
+  ResultTile result_tile_2_0_3(3, 0, *(schema.get()));
+  ResultTile result_tile_3_0_3(3, 2, *(schema.get()));
 
   // Initialize result_space_tiles
   ResultSpaceTile<int32_t> rst_1_0;
@@ -228,15 +301,11 @@ TEST_CASE_METHOD(
   ResultSpaceTile<int32_t> rst_3_2;
   rst_3_2.set_start_coords({7, 11});
 
-  // Prepare correct space tiles map
-  std::map<const int32_t*, ResultSpaceTile<int32_t>> c_result_space_tiles;
-  c_result_space_tiles[(const int32_t*)&(tile_coords[0][0])] = rst_1_0;
-  c_result_space_tiles[(const int32_t*)&(tile_coords[1][0])] = rst_1_2;
-  c_result_space_tiles[(const int32_t*)&(tile_coords[2][0])] = rst_2_0;
-  c_result_space_tiles[(const int32_t*)&(tile_coords[3][0])] = rst_2_2;
-  c_result_space_tiles[(const int32_t*)&(tile_coords[4][0])] = rst_3_0;
-  c_result_space_tiles[(const int32_t*)&(tile_coords[5][0])] = rst_3_2;
-
   // Check correctness
-  CHECK(result_space_tiles == c_result_space_tiles);
+  CHECK(result_space_tiles[(const int32_t*)&(tile_coords[0][0])] == rst_1_0);
+  CHECK(result_space_tiles[(const int32_t*)&(tile_coords[1][0])] == rst_1_2);
+  CHECK(result_space_tiles[(const int32_t*)&(tile_coords[2][0])] == rst_2_0);
+  CHECK(result_space_tiles[(const int32_t*)&(tile_coords[3][0])] == rst_2_2);
+  CHECK(result_space_tiles[(const int32_t*)&(tile_coords[4][0])] == rst_3_0);
+  CHECK(result_space_tiles[(const int32_t*)&(tile_coords[5][0])] == rst_3_2);
 }

@@ -31,7 +31,8 @@
  * C++ API.
  */
 
-#include "catch.hpp"
+#include <test/support/tdb_catch.h>
+#include "test/support/src/helpers.h"
 #include "tiledb/sm/cpp_api/tiledb"
 
 using namespace tiledb;
@@ -63,6 +64,7 @@ void create_sparse_array(const std::string& array_name) {
 void write_sparse_array(
     Context ctx,
     const std::string& array_name,
+    const bool serialized_writes,
     std::vector<int32_t>& data,
     std::vector<uint64_t>& data_offsets,
     tiledb_layout_t layout) {
@@ -76,10 +78,13 @@ void write_sparse_array(
   query.set_data_buffer("d2", d2);
   query.set_data_buffer("attr", data);
   query.set_offsets_buffer("attr", data_offsets);
-  CHECK_NOTHROW(query.submit());
 
-  // Finalize is necessary in global writes, otherwise a no-op
-  query.finalize();
+  if (!serialized_writes) {
+    CHECK_NOTHROW(query.submit());
+    query.finalize();
+  } else {
+    test::submit_and_finalize_serialized_query(ctx, query);
+  }
 
   array.close();
 }
@@ -87,6 +92,7 @@ void write_sparse_array(
 void write_sparse_array(
     Context ctx,
     const std::string& array_name,
+    const bool,  // serialized_writes,
     std::vector<int32_t>& data,
     std::vector<uint32_t>& data_offsets,
     tiledb_layout_t layout) {
@@ -103,9 +109,15 @@ void write_sparse_array(
       "attr",
       reinterpret_cast<uint64_t*>(data_offsets.data()),
       data_offsets.size());
+  /* TODO: enable this when sc21681 is fixed
+  if (!serialized_writes) {
+    CHECK_NOTHROW(query.submit());
+    query.finalize();
+  } else {
+    test::submit_and_finalize_serialized_query(ctx, query);
+  }
+  */
   CHECK_NOTHROW(query.submit());
-
-  // Finalize is necessary in global writes, otherwise a no-op
   query.finalize();
 
   array.close();
@@ -204,6 +216,37 @@ void partial_read_and_check_sparse_array(
   array.close();
 }
 
+void read_and_check_empty_coords_array(
+    Context ctx, const std::string& array_name, tiledb_layout_t layout) {
+  Array array(ctx, array_name, TILEDB_READ);
+  Query query(ctx, array, TILEDB_READ);
+
+  std::vector<int32_t> attr_val(4);
+  std::vector<uint64_t> attr_off(4);
+
+  query.set_layout(layout);
+  query.set_data_buffer("attr", attr_val);
+  query.set_offsets_buffer("attr", attr_off);
+
+  // Query outside unwritten coordinates of the array
+  int64_t d1_start = 1, d1_end = 2;
+  int64_t d2_start = 3, d2_end = 4;
+  query.add_range("d1", d1_start, d1_end);
+  query.add_range("d2", d2_start, d2_end);
+
+  CHECK_NOTHROW(query.submit());
+
+  // Check the element offsets are properly returned
+  uint64_t offset_elem_num = 0, data_vals_num = 0, validity_elem_num = 0;
+  std::tie(offset_elem_num, data_vals_num, validity_elem_num) =
+      query.result_buffer_elements_nullable()["attr"];
+
+  CHECK(offset_elem_num == 0);
+  CHECK(data_vals_num == 0);
+
+  array.close();
+}
+
 void create_dense_array(const std::string& array_name) {
   Context ctx;
   VFS vfs(ctx);
@@ -230,10 +273,11 @@ void create_dense_array(const std::string& array_name) {
 void write_dense_array(
     Context ctx,
     const std::string& array_name,
+    const bool serialized_writes,
     std::vector<int32_t>& data,
     std::vector<uint64_t>& data_offsets,
     tiledb_layout_t layout,
-    std::shared_ptr<Config> config = nullptr) {
+    shared_ptr<Config> config = nullptr) {
   std::vector<int64_t> d1 = {1, 1, 2, 2};
   std::vector<int64_t> d2 = {1, 2, 1, 2};
 
@@ -260,10 +304,12 @@ void write_dense_array(
     query.set_subarray<int64_t>({1, 2, 1, 2});
   }
 
-  CHECK_NOTHROW(query.submit());
-
-  // Finalize is necessary in global writes, otherwise a no-op
-  query.finalize();
+  if (!serialized_writes) {
+    CHECK_NOTHROW(query.submit());
+    query.finalize();
+  } else {
+    test::submit_and_finalize_serialized_query(ctx, query);
+  }
 
   array.close();
 }
@@ -271,10 +317,11 @@ void write_dense_array(
 void write_dense_array(
     Context ctx,
     const std::string& array_name,
+    bool serialized_writes,
     std::vector<int32_t>& data,
     std::vector<uint32_t>& data_offsets,
     tiledb_layout_t layout,
-    std::shared_ptr<Config> config = nullptr) {
+    shared_ptr<Config> config = nullptr) {
   std::vector<int64_t> d1 = {1, 1, 2, 2};
   std::vector<int64_t> d2 = {1, 2, 1, 2};
 
@@ -306,9 +353,14 @@ void write_dense_array(
     query.set_subarray<int64_t>({1, 2, 1, 2});
   }
 
-  CHECK_NOTHROW(query.submit());
-  // Finalize is necessary in global writes, otherwise a no-op
-  query.finalize();
+  // TODO: remove this when sc21681 is fixed
+  serialized_writes = false;
+  if (!serialized_writes) {
+    CHECK_NOTHROW(query.submit());
+    query.finalize();
+  } else {
+    test::submit_and_finalize_serialized_query(ctx, query);
+  }
 
   array.close();
 }
@@ -318,7 +370,7 @@ void read_and_check_dense_array(
     const std::string& array_name,
     std::vector<int32_t>& expected_data,
     std::vector<uint64_t>& expected_offsets,
-    std::shared_ptr<Config> config = nullptr) {
+    shared_ptr<Config> config = nullptr) {
   Array array(ctx, array_name, TILEDB_READ);
   Query query(ctx, array, TILEDB_READ);
 
@@ -350,7 +402,7 @@ void read_and_check_dense_array(
     const std::string& array_name,
     std::vector<int32_t>& expected_data,
     std::vector<uint32_t>& expected_offsets,
-    std::shared_ptr<Config> config = nullptr) {
+    shared_ptr<Config> config = nullptr) {
   Array array(ctx, array_name, TILEDB_READ);
   Query query(ctx, array, TILEDB_READ);
 
@@ -427,7 +479,8 @@ TEST_CASE(
     std::vector<uint64_t> byte_offsets = {0, 4, 12, 20};
 
     SECTION("Unordered write") {
-      write_sparse_array(ctx, array_name, data, byte_offsets, TILEDB_UNORDERED);
+      write_sparse_array(
+          ctx, array_name, false, data, byte_offsets, TILEDB_UNORDERED);
       SECTION("Row major read") {
         read_and_check_sparse_array(
             ctx, array_name, data, byte_offsets, TILEDB_ROW_MAJOR);
@@ -442,8 +495,18 @@ TEST_CASE(
       }
     }
     SECTION("Global order write") {
+#ifdef TILEDB_SERIALIZATION
+      bool serialized_writes = GENERATE(true, false);
+#else
+      bool serialized_writes = false;
+#endif
       write_sparse_array(
-          ctx, array_name, data, byte_offsets, TILEDB_GLOBAL_ORDER);
+          ctx,
+          array_name,
+          serialized_writes,
+          data,
+          byte_offsets,
+          TILEDB_GLOBAL_ORDER);
       SECTION("Row major read") {
         read_and_check_sparse_array(
             ctx, array_name, data, byte_offsets, TILEDB_ROW_MAJOR);
@@ -469,7 +532,7 @@ TEST_CASE(
 
     SECTION("Unordered write") {
       write_sparse_array(
-          ctx, array_name, data, element_offsets, TILEDB_UNORDERED);
+          ctx, array_name, false, data, element_offsets, TILEDB_UNORDERED);
       SECTION("Row major read") {
         read_and_check_sparse_array(
             ctx, array_name, data, element_offsets, TILEDB_ROW_MAJOR);
@@ -484,8 +547,18 @@ TEST_CASE(
       }
     }
     SECTION("Global order write") {
+#ifdef TILEDB_SERIALIZATION
+      bool serialized_writes = GENERATE(true, false);
+#else
+      bool serialized_writes = false;
+#endif
       write_sparse_array(
-          ctx, array_name, data, element_offsets, TILEDB_GLOBAL_ORDER);
+          ctx,
+          array_name,
+          serialized_writes,
+          data,
+          element_offsets,
+          TILEDB_GLOBAL_ORDER);
       SECTION("Row major read") {
         read_and_check_sparse_array(
             ctx, array_name, data, element_offsets, TILEDB_ROW_MAJOR);
@@ -523,12 +596,13 @@ TEST_CASE(
     std::vector<uint64_t> byte_offsets = {0, 4, 12, 20};
 
     SECTION("Ordered write") {
-      write_dense_array(ctx, array_name, data, byte_offsets, TILEDB_ROW_MAJOR);
+      write_dense_array(
+          ctx, array_name, false, data, byte_offsets, TILEDB_ROW_MAJOR);
       read_and_check_dense_array(ctx, array_name, data, byte_offsets);
     }
     SECTION("Global order write") {
       write_dense_array(
-          ctx, array_name, data, byte_offsets, TILEDB_GLOBAL_ORDER);
+          ctx, array_name, false, data, byte_offsets, TILEDB_GLOBAL_ORDER);
       read_and_check_dense_array(ctx, array_name, data, byte_offsets);
     }
   }
@@ -543,12 +617,12 @@ TEST_CASE(
 
     SECTION("Ordered write") {
       write_dense_array(
-          ctx, array_name, data, element_offsets, TILEDB_ROW_MAJOR);
+          ctx, array_name, false, data, element_offsets, TILEDB_ROW_MAJOR);
       read_and_check_dense_array(ctx, array_name, data, element_offsets);
     }
     SECTION("Global order write") {
       write_dense_array(
-          ctx, array_name, data, element_offsets, TILEDB_GLOBAL_ORDER);
+          ctx, array_name, false, data, element_offsets, TILEDB_GLOBAL_ORDER);
       read_and_check_dense_array(ctx, array_name, data, element_offsets);
     }
   }
@@ -577,7 +651,8 @@ TEST_CASE(
       config = ctx.config();
       CHECK((std::string)config["sm.var_offsets.extra_element"] == "false");
 
-      write_sparse_array(ctx, array_name, data, data_offsets, TILEDB_UNORDERED);
+      write_sparse_array(
+          ctx, array_name, false, data, data_offsets, TILEDB_UNORDERED);
       SECTION("Row major read") {
         read_and_check_sparse_array(
             ctx, array_name, data, data_offsets, TILEDB_ROW_MAJOR);
@@ -604,7 +679,7 @@ TEST_CASE(
 
         SECTION("Unordered write") {
           write_sparse_array(
-              ctx, array_name, data, data_offsets, TILEDB_UNORDERED);
+              ctx, array_name, false, data, data_offsets, TILEDB_UNORDERED);
           SECTION("Row major read") {
             read_and_check_sparse_array(
                 ctx, array_name, data, data_offsets, TILEDB_ROW_MAJOR);
@@ -619,8 +694,18 @@ TEST_CASE(
           }
         }
         SECTION("Global order write") {
+#ifdef TILEDB_SERIALIZATION
+          bool serialized_writes = GENERATE(true, false);
+#else
+          bool serialized_writes = false;
+#endif
           write_sparse_array(
-              ctx, array_name, data, data_offsets, TILEDB_GLOBAL_ORDER);
+              ctx,
+              array_name,
+              serialized_writes,
+              data,
+              data_offsets,
+              TILEDB_GLOBAL_ORDER);
           SECTION("Row major read") {
             read_and_check_sparse_array(
                 ctx, array_name, data, data_offsets, TILEDB_ROW_MAJOR);
@@ -645,7 +730,7 @@ TEST_CASE(
 
         SECTION("Unordered write") {
           write_sparse_array(
-              ctx, array_name, data, element_offsets, TILEDB_UNORDERED);
+              ctx, array_name, false, data, element_offsets, TILEDB_UNORDERED);
           SECTION("Row major read") {
             read_and_check_sparse_array(
                 ctx, array_name, data, element_offsets, TILEDB_ROW_MAJOR);
@@ -660,8 +745,18 @@ TEST_CASE(
           }
         }
         SECTION("Global order write") {
+#ifdef TILEDB_SERIALIZATION
+          bool serialized_writes = GENERATE(true, false);
+#else
+          bool serialized_writes = false;
+#endif
           write_sparse_array(
-              ctx, array_name, data, element_offsets, TILEDB_GLOBAL_ORDER);
+              ctx,
+              array_name,
+              serialized_writes,
+              data,
+              element_offsets,
+              TILEDB_GLOBAL_ORDER);
           SECTION("Row major read") {
             read_and_check_sparse_array(
                 ctx, array_name, data, element_offsets, TILEDB_ROW_MAJOR);
@@ -673,6 +768,57 @@ TEST_CASE(
           SECTION("Unordered read") {
             read_and_check_sparse_array(
                 ctx, array_name, data, element_offsets, TILEDB_UNORDERED);
+          }
+        }
+      }
+
+      SECTION("Query unwritten coordinates") {
+        CHECK((std::string)config["sm.var_offsets.mode"] == "bytes");
+        Context ctx(config);
+
+        // Write data with extra element indicating total number of bytes
+        data_offsets.push_back(sizeof(data[0]) * data.size());
+
+        SECTION("Unordered write") {
+          write_sparse_array(
+              ctx, array_name, false, data, data_offsets, TILEDB_UNORDERED);
+          SECTION("Row major read") {
+            read_and_check_empty_coords_array(
+                ctx, array_name, TILEDB_ROW_MAJOR);
+          }
+          SECTION("Global order read") {
+            read_and_check_empty_coords_array(
+                ctx, array_name, TILEDB_GLOBAL_ORDER);
+          }
+          SECTION("Unordered read") {
+            read_and_check_empty_coords_array(
+                ctx, array_name, TILEDB_UNORDERED);
+          }
+        }
+        SECTION("Global order write") {
+#ifdef TILEDB_SERIALIZATION
+          bool serialized_writes = GENERATE(true, false);
+#else
+          bool serialized_writes = false;
+#endif
+          write_sparse_array(
+              ctx,
+              array_name,
+              serialized_writes,
+              data,
+              data_offsets,
+              TILEDB_GLOBAL_ORDER);
+          SECTION("Row major read") {
+            read_and_check_empty_coords_array(
+                ctx, array_name, TILEDB_ROW_MAJOR);
+          }
+          SECTION("Global order read") {
+            read_and_check_empty_coords_array(
+                ctx, array_name, TILEDB_GLOBAL_ORDER);
+          }
+          SECTION("Unordered read") {
+            read_and_check_empty_coords_array(
+                ctx, array_name, TILEDB_UNORDERED);
           }
         }
       }
@@ -766,7 +912,8 @@ TEST_CASE(
       config = ctx.config();
       CHECK((std::string)config["sm.var_offsets.extra_element"] == "false");
 
-      write_sparse_array(ctx, array_name, data, data_offsets, TILEDB_UNORDERED);
+      write_sparse_array(
+          ctx, array_name, false, data, data_offsets, TILEDB_UNORDERED);
       SECTION("Row major read") {
         partial_read_and_check_sparse_array(
             ctx,
@@ -815,7 +962,7 @@ TEST_CASE(
 
         SECTION("Unordered write") {
           write_sparse_array(
-              ctx, array_name, data, data_offsets, TILEDB_UNORDERED);
+              ctx, array_name, false, data, data_offsets, TILEDB_UNORDERED);
           SECTION("Row major read") {
             partial_read_and_check_sparse_array(
                 ctx,
@@ -848,8 +995,18 @@ TEST_CASE(
           }
         }
         SECTION("Global order write") {
+#ifdef TILEDB_SERIALIZATION
+          bool serialized_writes = GENERATE(true, false);
+#else
+          bool serialized_writes = false;
+#endif
           write_sparse_array(
-              ctx, array_name, data, data_offsets, TILEDB_GLOBAL_ORDER);
+              ctx,
+              array_name,
+              serialized_writes,
+              data,
+              data_offsets,
+              TILEDB_GLOBAL_ORDER);
           SECTION("Row major read") {
             partial_read_and_check_sparse_array(
                 ctx,
@@ -896,7 +1053,7 @@ TEST_CASE(
 
         SECTION("Unordered write") {
           write_sparse_array(
-              ctx, array_name, data, element_offsets, TILEDB_UNORDERED);
+              ctx, array_name, false, data, element_offsets, TILEDB_UNORDERED);
           SECTION("Row major read") {
             partial_read_and_check_sparse_array(
                 ctx,
@@ -929,8 +1086,18 @@ TEST_CASE(
           }
         }
         SECTION("Global order write") {
+#ifdef TILEDB_SERIALIZATION
+          bool serialized_writes = GENERATE(true, false);
+#else
+          bool serialized_writes = false;
+#endif
           write_sparse_array(
-              ctx, array_name, data, element_offsets, TILEDB_GLOBAL_ORDER);
+              ctx,
+              array_name,
+              serialized_writes,
+              data,
+              element_offsets,
+              TILEDB_GLOBAL_ORDER);
           SECTION("Row major read") {
             partial_read_and_check_sparse_array(
                 ctx,
@@ -968,7 +1135,7 @@ TEST_CASE(
         // Write data with extra element
         data_offsets.push_back(sizeof(data[0]) * data.size());
         write_sparse_array(
-            ctx, array_name, data, data_offsets, TILEDB_UNORDERED);
+            ctx, array_name, false, data, data_offsets, TILEDB_UNORDERED);
 
         // Submit read query
         Context ctx(config);
@@ -1069,7 +1236,8 @@ TEST_CASE(
       config = ctx.config();
       CHECK((std::string)config["sm.var_offsets.extra_element"] == "false");
 
-      write_dense_array(ctx, array_name, data, data_offsets, TILEDB_ROW_MAJOR);
+      write_dense_array(
+          ctx, array_name, false, data, data_offsets, TILEDB_ROW_MAJOR);
       read_and_check_dense_array(ctx, array_name, data, data_offsets);
     }
 
@@ -1085,12 +1253,12 @@ TEST_CASE(
 
         SECTION("Ordered write") {
           write_dense_array(
-              ctx, array_name, data, data_offsets, TILEDB_ROW_MAJOR);
+              ctx, array_name, false, data, data_offsets, TILEDB_ROW_MAJOR);
           read_and_check_dense_array(ctx, array_name, data, data_offsets);
         }
         SECTION("Global order write") {
           write_dense_array(
-              ctx, array_name, data, data_offsets, TILEDB_GLOBAL_ORDER);
+              ctx, array_name, false, data, data_offsets, TILEDB_GLOBAL_ORDER);
           read_and_check_dense_array(ctx, array_name, data, data_offsets);
         }
       }
@@ -1099,17 +1267,23 @@ TEST_CASE(
         config["sm.var_offsets.mode"] = "elements";
         Context ctx(config);
 
-        // Write data with extra element indicating the total number of elements
+        // Write data with extra element indicating the total number of
+        // elements
         element_offsets.push_back(data.size());
 
         SECTION("Ordered write") {
           write_dense_array(
-              ctx, array_name, data, element_offsets, TILEDB_ROW_MAJOR);
+              ctx, array_name, false, data, element_offsets, TILEDB_ROW_MAJOR);
           read_and_check_dense_array(ctx, array_name, data, element_offsets);
         }
         SECTION("Global order write") {
           write_dense_array(
-              ctx, array_name, data, element_offsets, TILEDB_GLOBAL_ORDER);
+              ctx,
+              array_name,
+              false,
+              data,
+              element_offsets,
+              TILEDB_GLOBAL_ORDER);
           read_and_check_dense_array(ctx, array_name, data, element_offsets);
         }
       }
@@ -1197,7 +1371,8 @@ TEST_CASE(
       config = ctx.config();
       CHECK((std::string)config["sm.var_offsets.extra_element"] == "false");
 
-      write_dense_array(ctx, array_name, data, data_offsets, TILEDB_ROW_MAJOR);
+      write_dense_array(
+          ctx, array_name, false, data, data_offsets, TILEDB_ROW_MAJOR);
       partial_read_and_check_dense_array(
           ctx,
           array_name,
@@ -1223,7 +1398,7 @@ TEST_CASE(
 
         SECTION("Ordered write") {
           write_dense_array(
-              ctx, array_name, data, data_offsets, TILEDB_ROW_MAJOR);
+              ctx, array_name, false, data, data_offsets, TILEDB_ROW_MAJOR);
           partial_read_and_check_dense_array(
               ctx,
               array_name,
@@ -1234,7 +1409,7 @@ TEST_CASE(
         }
         SECTION("Global order write") {
           write_dense_array(
-              ctx, array_name, data, data_offsets, TILEDB_GLOBAL_ORDER);
+              ctx, array_name, false, data, data_offsets, TILEDB_GLOBAL_ORDER);
           partial_read_and_check_dense_array(
               ctx,
               array_name,
@@ -1258,7 +1433,7 @@ TEST_CASE(
 
         SECTION("Ordered write") {
           write_dense_array(
-              ctx, array_name, data, element_offsets, TILEDB_ROW_MAJOR);
+              ctx, array_name, false, data, element_offsets, TILEDB_ROW_MAJOR);
           partial_read_and_check_dense_array(
               ctx,
               array_name,
@@ -1269,7 +1444,12 @@ TEST_CASE(
         }
         SECTION("Global order write") {
           write_dense_array(
-              ctx, array_name, data, element_offsets, TILEDB_GLOBAL_ORDER);
+              ctx,
+              array_name,
+              false,
+              data,
+              element_offsets,
+              TILEDB_GLOBAL_ORDER);
           partial_read_and_check_dense_array(
               ctx,
               array_name,
@@ -1285,7 +1465,7 @@ TEST_CASE(
         // Write data with extra element
         data_offsets.push_back(sizeof(data[0]) * data.size());
         write_dense_array(
-            ctx, array_name, data, data_offsets, TILEDB_ROW_MAJOR);
+            ctx, array_name, false, data, data_offsets, TILEDB_ROW_MAJOR);
 
         // Submit read query
         Array array(ctx, array_name, TILEDB_READ);
@@ -1388,7 +1568,7 @@ TEST_CASE(
 
     SECTION("Unordered write") {
       write_sparse_array(
-          ctx, array_name, data, data_byte_offsets, TILEDB_UNORDERED);
+          ctx, array_name, false, data, data_byte_offsets, TILEDB_UNORDERED);
       SECTION("Row major read") {
         read_and_check_sparse_array(
             ctx, array_name, data, data_byte_offsets, TILEDB_ROW_MAJOR);
@@ -1403,8 +1583,18 @@ TEST_CASE(
       }
     }
     SECTION("Global order write") {
+#ifdef TILEDB_SERIALIZATION
+      bool serialized_writes = GENERATE(true, false);
+#else
+      bool serialized_writes = false;
+#endif
       write_sparse_array(
-          ctx, array_name, data, data_byte_offsets, TILEDB_GLOBAL_ORDER);
+          ctx,
+          array_name,
+          serialized_writes,
+          data,
+          data_byte_offsets,
+          TILEDB_GLOBAL_ORDER);
       SECTION("Row major read") {
         read_and_check_sparse_array(
             ctx, array_name, data, data_byte_offsets, TILEDB_ROW_MAJOR);
@@ -1430,7 +1620,7 @@ TEST_CASE(
 
     SECTION("Unordered write") {
       write_sparse_array(
-          ctx, array_name, data, data_element_offsets, TILEDB_UNORDERED);
+          ctx, array_name, false, data, data_element_offsets, TILEDB_UNORDERED);
       SECTION("Row major read") {
         read_and_check_sparse_array(
             ctx, array_name, data, data_element_offsets, TILEDB_ROW_MAJOR);
@@ -1445,8 +1635,18 @@ TEST_CASE(
       }
     }
     SECTION("Global order write") {
+#ifdef TILEDB_SERIALIZATION
+      bool serialized_writes = GENERATE(true, false);
+#else
+      bool serialized_writes = false;
+#endif
       write_sparse_array(
-          ctx, array_name, data, data_element_offsets, TILEDB_GLOBAL_ORDER);
+          ctx,
+          array_name,
+          serialized_writes,
+          data,
+          data_element_offsets,
+          TILEDB_GLOBAL_ORDER);
       SECTION("Row major read") {
         read_and_check_sparse_array(
             ctx, array_name, data, data_element_offsets, TILEDB_ROW_MAJOR);
@@ -1472,7 +1672,7 @@ TEST_CASE(
 
     SECTION("Unordered write") {
       write_sparse_array(
-          ctx, array_name, data, data_byte_offsets, TILEDB_UNORDERED);
+          ctx, array_name, false, data, data_byte_offsets, TILEDB_UNORDERED);
       SECTION("Row major read") {
         read_and_check_sparse_array(
             ctx, array_name, data, data_byte_offsets, TILEDB_ROW_MAJOR);
@@ -1487,8 +1687,18 @@ TEST_CASE(
       }
     }
     SECTION("Global order write") {
+#ifdef TILEDB_SERIALIZATION
+      bool serialized_writes = GENERATE(true, false);
+#else
+      bool serialized_writes = false;
+#endif
       write_sparse_array(
-          ctx, array_name, data, data_byte_offsets, TILEDB_GLOBAL_ORDER);
+          ctx,
+          array_name,
+          serialized_writes,
+          data,
+          data_byte_offsets,
+          TILEDB_GLOBAL_ORDER);
       SECTION("Row major read") {
         read_and_check_sparse_array(
             ctx, array_name, data, data_byte_offsets, TILEDB_ROW_MAJOR);
@@ -1534,12 +1744,12 @@ TEST_CASE(
 
     SECTION("Ordered write") {
       write_dense_array(
-          ctx, array_name, data, data_byte_offsets, TILEDB_ROW_MAJOR);
+          ctx, array_name, false, data, data_byte_offsets, TILEDB_ROW_MAJOR);
       read_and_check_dense_array(ctx, array_name, data, data_byte_offsets);
     }
     SECTION("Global order write") {
       write_dense_array(
-          ctx, array_name, data, data_byte_offsets, TILEDB_GLOBAL_ORDER);
+          ctx, array_name, false, data, data_byte_offsets, TILEDB_GLOBAL_ORDER);
       read_and_check_dense_array(ctx, array_name, data, data_byte_offsets);
     }
   }
@@ -1554,12 +1764,17 @@ TEST_CASE(
 
     SECTION("Ordered write") {
       write_dense_array(
-          ctx, array_name, data, data_element_offsets, TILEDB_ROW_MAJOR);
+          ctx, array_name, false, data, data_element_offsets, TILEDB_ROW_MAJOR);
       read_and_check_dense_array(ctx, array_name, data, data_element_offsets);
     }
     SECTION("Global order write") {
       write_dense_array(
-          ctx, array_name, data, data_element_offsets, TILEDB_GLOBAL_ORDER);
+          ctx,
+          array_name,
+          false,
+          data,
+          data_element_offsets,
+          TILEDB_GLOBAL_ORDER);
       read_and_check_dense_array(ctx, array_name, data, data_element_offsets);
     }
   }
@@ -1574,12 +1789,12 @@ TEST_CASE(
 
     SECTION("Ordered write") {
       write_dense_array(
-          ctx, array_name, data, data_byte_offsets, TILEDB_ROW_MAJOR);
+          ctx, array_name, false, data, data_byte_offsets, TILEDB_ROW_MAJOR);
       read_and_check_dense_array(ctx, array_name, data, data_byte_offsets);
     }
     SECTION("Global order write") {
       write_dense_array(
-          ctx, array_name, data, data_byte_offsets, TILEDB_GLOBAL_ORDER);
+          ctx, array_name, false, data, data_byte_offsets, TILEDB_GLOBAL_ORDER);
       read_and_check_dense_array(ctx, array_name, data, data_byte_offsets);
     }
   }
@@ -1656,6 +1871,53 @@ TEST_CASE(
 
     CHECK(query.query_status() == Query::Status::COMPLETE);
     CHECK(offsets_back[4] == data.size());
+  }
+
+  // Regression test for https://github.com/TileDB-Inc/TileDB/pull/2540
+  // Test that the query execution with empty result does not write out
+  // of buffer bounds. We create an oversize buffer with guard values
+  // ahead of the actual pointer range given to libtiledb; we run the
+  // query to completion with empty result; then we check the guard
+  // values. This test fails prior to PR#2540.
+  {
+    Config config;
+    // Change config of offsets bitsize from 64 to 32
+    config["sm.var_offsets.bitsize"] = 32;
+    // Add extra element
+    config["sm.var_offsets.extra_element"] = "true";
+    Context ctx(config);
+
+    std::vector<uint32_t> offsets_back(14);
+
+    const std::vector<size_t> guard_idx = {0, 1, 2, 3, 10, 11, 12, 13};
+    const uint32_t guard_val =
+        std::numeric_limits<uint32_t>::max() - (uint32_t)10;
+    for (auto idx : guard_idx) {
+      offsets_back[idx] = guard_val;
+    }
+    std::string data_back;
+    data_back.resize(data.size());
+
+    auto array = tiledb::Array(ctx, array_name, TILEDB_READ);
+    Query query(ctx, array, TILEDB_READ);
+    // this query range should return empty result
+    query.add_range(0, std::string("xyz"), std::string("xyz"));
+    query.set_data_buffer("dim1", (char*)data_back.data(), data_back.size());
+
+    // here we set the buffer at an offset of 2*uint64_t (== 4 * uint32_t)
+    // from the real start because we cast to uint64_t* to keep the C++
+    // API type-check happy
+    query.set_offsets_buffer(
+        "dim1", (uint64_t*)offsets_back.data() + 2, offsets_back.size() - 2);
+
+    query.submit();
+
+    CHECK(query.query_status() == Query::Status::COMPLETE);
+
+    // check the guard values match on both sides of the buffer
+    for (auto idx : guard_idx) {
+      CHECK(offsets_back[idx] == guard_val);
+    }
   }
 
   Context ctx;

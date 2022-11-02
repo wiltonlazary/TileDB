@@ -45,12 +45,18 @@
 #include "tiledb/common/status.h"
 #include "tiledb/common/thread_pool.h"
 #include "tiledb/sm/config/config.h"
-#include "tiledb/sm/filesystem/filelock.h"
 
 using namespace tiledb::common;
 
 namespace tiledb {
+
+namespace common::filesystem {
+class directory_entry;
+}
+
 namespace sm {
+
+class URI;
 
 /**
  * This class implements the POSIX filesystem functions.
@@ -122,26 +128,6 @@ class Posix {
   Status file_size(const std::string& path, uint64_t* size) const;
 
   /**
-   * Lock a given filename and retrieve an open file descriptor handle.
-   *
-   * @param filename The filelock to lock
-   * @param fd A pointer to a file descriptor
-   * @param shared *True* if this is a shared lock, *false* if it is an
-   * exclusive lock.
-   * @return Status
-   */
-  Status filelock_lock(
-      const std::string& filename, filelock_t* fd, bool shared) const;
-
-  /**
-   * Unlock an opened file descriptor
-   *
-   * @param fd the open file descriptor to unlock
-   * @return Status
-   */
-  Status filelock_unlock(int fd) const;
-
-  /**
    * Initialize this instance with the given config.
    *
    * @param config Config parameters.
@@ -175,6 +161,16 @@ class Posix {
    * @return Status
    */
   Status ls(const std::string& path, std::vector<std::string>* paths) const;
+
+  /**
+   *
+   * Lists files and file information one level deep under a given path.
+   *
+   * @param uri The parent path to list sub-paths.
+   * @return A list of directory_entry objects
+   */
+  tuple<Status, optional<std::vector<filesystem::directory_entry>>>
+  ls_with_sizes(const URI& uri) const;
 
   /**
    * Move a given filesystem path.

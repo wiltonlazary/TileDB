@@ -30,10 +30,11 @@
  * Tests for the C API object management code.
  */
 
-#include "catch.hpp"
-#include "test/src/helpers.h"
-#include "test/src/vfs_helpers.h"
+#include <test/support/tdb_catch.h>
+#include "test/support/src/helpers.h"
+#include "test/support/src/vfs_helpers.h"
 #ifdef _WIN32
+#include "tiledb/sm/filesystem/path_win.h"
 #include "tiledb/sm/filesystem/win.h"
 #else
 #include "tiledb/sm/filesystem/posix.h"
@@ -394,8 +395,9 @@ TEST_CASE_METHOD(
     // `VFS::ls(...)` returns `file:///` URIs instead of Windows paths.
     SupportedFsLocal windows_fs;
     std::string temp_dir = windows_fs.file_prefix() + windows_fs.temp_dir();
-    golden_walk = get_golden_walk(tiledb::sm::Win::uri_from_path(temp_dir));
-    golden_ls = get_golden_ls(tiledb::sm::Win::uri_from_path(temp_dir));
+    golden_walk =
+        get_golden_walk(tiledb::sm::path_win::uri_from_path(temp_dir));
+    golden_ls = get_golden_ls(tiledb::sm::path_win::uri_from_path(temp_dir));
 #else
     SupportedFsLocal posix_fs;
     std::string temp_dir = posix_fs.file_prefix() + posix_fs.temp_dir();
@@ -411,10 +413,10 @@ TEST_CASE_METHOD(
     rc = tiledb_object_walk(
         ctx_, temp_dir.c_str(), TILEDB_POSTORDER, write_path, &walk_str);
     CHECK(rc == TILEDB_OK);
-    CHECK_THAT(golden_walk, Catch::Equals(walk_str));
+    CHECK_THAT(golden_walk, Catch::Matchers::Equals(walk_str));
     rc = tiledb_object_ls(ctx_, temp_dir.c_str(), write_path, &ls_str);
     CHECK(rc == TILEDB_OK);
-    CHECK_THAT(golden_ls, Catch::Equals(ls_str));
+    CHECK_THAT(golden_ls, Catch::Matchers::Equals(ls_str));
     remove_temp_dir(temp_dir);
   } else if (dynamic_cast<SupportedFsHDFS*>(fs) != nullptr) {
     std::string temp_dir = "hdfs://localhost:9000/tiledb_test/";
@@ -430,10 +432,10 @@ TEST_CASE_METHOD(
     rc = tiledb_object_walk(
         ctx_, temp_dir.c_str(), TILEDB_POSTORDER, write_path, &walk_str);
     CHECK(rc == TILEDB_OK);
-    CHECK_THAT(golden_walk, Catch::Equals(walk_str));
+    CHECK_THAT(golden_walk, Catch::Matchers::Equals(walk_str));
     rc = tiledb_object_ls(ctx_, temp_dir.c_str(), write_path, &ls_str);
     CHECK(rc == TILEDB_OK);
-    CHECK_THAT(golden_ls, Catch::Equals(ls_str));
+    CHECK_THAT(golden_ls, Catch::Matchers::Equals(ls_str));
     remove_temp_dir(temp_dir);
   } else {
     // TODO: refactor for each supported FS.
@@ -450,10 +452,10 @@ TEST_CASE_METHOD(
     rc = tiledb_object_walk(
         ctx_, temp_dir.c_str(), TILEDB_POSTORDER, write_path, &walk_str);
     CHECK(rc == TILEDB_OK);
-    CHECK_THAT(golden_walk, Catch::Equals(walk_str));
+    CHECK_THAT(golden_walk, Catch::Matchers::Equals(walk_str));
     rc = tiledb_object_ls(ctx_, temp_dir.c_str(), write_path, &ls_str);
     CHECK(rc == TILEDB_OK);
-    CHECK_THAT(golden_ls, Catch::Equals(ls_str));
+    CHECK_THAT(golden_ls, Catch::Matchers::Equals(ls_str));
     remove_temp_dir(temp_dir);
   }
 }

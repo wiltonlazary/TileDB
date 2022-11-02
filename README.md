@@ -54,7 +54,7 @@ You can find the detailed TileDB documentation at [https://docs.tiledb.com](http
 
 ## Building from source
 
-Please see [building from source](https://docs.tiledb.com/main/solutions/tiledb-embedded/installation/building-from-source) in
+Please see [building from source](https://docs.tiledb.com/main/how-to/installation/building-from-source) in
 the documentation.
 
 ## Format Specification
@@ -74,12 +74,12 @@ The TileDB team maintains a variety of APIs built on top of the C++ library:
 
 TileDB is also integrated with several popular databases and data science tools:
 
-* [Spark](https://docs.tiledb.com/spark/)
-* [Dask](https://docs.tiledb.com/dask/)
-* [MariaDB](https://docs.tiledb.com/mariadb/)
-* [PrestoDB](https://docs.tiledb.com/prestodb/)
-* [Geospatial](https://docs.tiledb.com/geospatial/) (GDAL, PDAL, Rasterio)
-* [Genomics](https://docs.tiledb.com/genomics/) (gVCF)
+* [Spark](https://docs.tiledb.com/main/integrations-and-extensions/distributed-computing/spark)
+* [Dask](https://docs.tiledb.com/main/integrations-and-extensions/distributed-computing/dask)
+* [MariaDB](https://docs.tiledb.com/main/integrations-and-extensions/sql/mariadb)
+* [PrestoDB](https://docs.tiledb.com/main/integrations-and-extensions/sql/prestodb)
+* [Geospatial](https://docs.tiledb.com/main/integrations-and-extensions/geospatial) (GDAL, PDAL, Rasterio)
+* [Genomics](https://docs.tiledb.com/main/integrations-and-extensions/population-genomics) (gVCF)
 
 ## Get involved
 

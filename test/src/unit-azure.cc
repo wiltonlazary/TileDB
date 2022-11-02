@@ -32,12 +32,13 @@
 
 #ifdef HAVE_AZURE
 
-#include "catch.hpp"
+#include <test/support/tdb_catch.h>
+#include "tiledb/common/filesystem/directory_entry.h"
 #include "tiledb/common/thread_pool.h"
 #include "tiledb/sm/config/config.h"
 #include "tiledb/sm/filesystem/azure.h"
 #include "tiledb/sm/global_state/unit_test_config.h"
-#include "tiledb/sm/misc/utils.h"
+#include "tiledb/sm/misc/tdb_time.h"
 
 #include <fstream>
 #include <thread>
@@ -68,7 +69,7 @@ struct AzureFx {
   const std::string TEST_DIR = AZURE_CONTAINER.to_string() + "tiledb_test_dir/";
 
   tiledb::sm::Azure azure_;
-  ThreadPool thread_pool_;
+  ThreadPool thread_pool_{2};
 
   AzureFx() = default;
   ~AzureFx();
@@ -102,7 +103,8 @@ void AzureFx::init_azure(Config&& config, ConfMap settings) {
   // Set provided config settings for connection
   std::for_each(settings.begin(), settings.end(), set_conf);
   REQUIRE(config.set("vfs.azure.use_https", "false").ok());
-  REQUIRE(thread_pool_.init(2).ok());
+
+  // Initialize
   REQUIRE(azure_.init(config, &thread_pool_).ok());
 
   // Create container
@@ -131,7 +133,7 @@ std::string AzureFx::random_container_name(const std::string& prefix) {
 
 TEST_CASE_METHOD(AzureFx, "Test Azure filesystem, file management", "[azure]") {
   Config config;
-  config.set("vfs.azure.use_block_list_upload", "true");
+  REQUIRE(config.set("vfs.azure.use_block_list_upload", "true").ok());
 
   auto settings =
       GENERATE(from_range(test_settings.begin(), test_settings.end()));
@@ -211,6 +213,23 @@ TEST_CASE_METHOD(AzureFx, "Test Azure filesystem, file management", "[azure]") {
   REQUIRE(azure_.is_dir(URI(TEST_DIR + "dir"), &is_dir).ok());
   REQUIRE(is_dir);  // This is viewed as a dir
 
+  // ls_with_sizes
+  std::string s = "abcdef";
+  CHECK(azure_.write(URI(file3), s.data(), s.size()).ok());
+  REQUIRE(azure_.flush_blob(URI(file3)).ok());
+
+  auto&& [status, rv] = azure_.ls_with_sizes(URI(dir));
+  auto children = *rv;
+  REQUIRE(status.ok());
+
+  REQUIRE(children.size() == 2);
+  CHECK(children[0].path().native() == file3);
+  CHECK(children[1].path().native() == subdir.substr(0, subdir.size() - 1));
+
+  CHECK(children[0].file_size() == s.size());
+  // Directories don't get a size
+  CHECK(children[1].file_size() == 0);
+
   // Move file
   REQUIRE(azure_.move_object(URI(file5), URI(file6)).ok());
   REQUIRE(azure_.is_blob(URI(file5), &is_blob).ok());
@@ -251,10 +270,15 @@ TEST_CASE_METHOD(
   Config config;
   const uint64_t max_parallel_ops = 2;
   const uint64_t block_list_block_size = 4 * 1024 * 1024;
-  config.set("vfs.azure.use_block_list_upload", "true");
-  config.set("vfs.azure.max_parallel_ops", std::to_string(max_parallel_ops));
-  config.set(
-      "vfs.azure.block_list_block_size", std::to_string(block_list_block_size));
+  REQUIRE(config.set("vfs.azure.use_block_list_upload", "true").ok());
+  REQUIRE(
+      config.set("vfs.azure.max_parallel_ops", std::to_string(max_parallel_ops))
+          .ok());
+  REQUIRE(config
+              .set(
+                  "vfs.azure.block_list_block_size",
+                  std::to_string(block_list_block_size))
+              .ok());
 
   auto settings =
       GENERATE(from_range(test_settings.begin(), test_settings.end()));
@@ -308,7 +332,7 @@ TEST_CASE_METHOD(
 
   // Read from the beginning
   auto read_buffer = new char[26];
-  uint64_t bytes_read;
+  uint64_t bytes_read = 0;
   REQUIRE(azure_.read(URI(largefile), 0, read_buffer, 26, 0, &bytes_read).ok());
   CHECK(26 == bytes_read);
   bool allok = true;
@@ -341,10 +365,15 @@ TEST_CASE_METHOD(
   Config config;
   const uint64_t max_parallel_ops = 2;
   const uint64_t block_list_block_size = 4 * 1024 * 1024;
-  config.set("vfs.azure.use_block_list_upload", "false");
-  config.set("vfs.azure.max_parallel_ops", std::to_string(max_parallel_ops));
-  config.set(
-      "vfs.azure.block_list_block_size", std::to_string(block_list_block_size));
+  REQUIRE(config.set("vfs.azure.use_block_list_upload", "false").ok());
+  REQUIRE(
+      config.set("vfs.azure.max_parallel_ops", std::to_string(max_parallel_ops))
+          .ok());
+  REQUIRE(config
+              .set(
+                  "vfs.azure.block_list_block_size",
+                  std::to_string(block_list_block_size))
+              .ok());
 
   auto settings =
       GENERATE(from_range(test_settings.begin(), test_settings.end()));
@@ -423,7 +452,7 @@ TEST_CASE_METHOD(
 
   // Read from the beginning
   auto read_buffer = new char[26];
-  uint64_t bytes_read;
+  uint64_t bytes_read = 0;
   REQUIRE(
       azure_.read(URI(large_file), 0, read_buffer, 26, 0, &bytes_read).ok());
   CHECK(26 == bytes_read);

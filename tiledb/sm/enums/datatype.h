@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -36,6 +36,7 @@
 
 #include "tiledb/common/status.h"
 #include "tiledb/sm/misc/constants.h"
+#include "tiledb/stdx/utility/to_underlying.h"
 
 #include <cassert>
 
@@ -51,8 +52,13 @@ enum class Datatype : uint8_t {
 #undef TILEDB_DATATYPE_ENUM
 };
 
-/** Returns the datatype size. */
-inline uint64_t datatype_size(Datatype type) {
+/**
+ *  Returns the datatype size.
+ *
+ *  This function also serves as a datatype validation function;
+ *  If 0 is returned, the input Datatype is invalid.
+ */
+inline uint64_t datatype_size(Datatype type) noexcept {
   switch (type) {
     case Datatype::INT32:
       return sizeof(int);
@@ -64,6 +70,10 @@ inline uint64_t datatype_size(Datatype type) {
       return sizeof(double);
     case Datatype::CHAR:
       return sizeof(char);
+    case Datatype::BLOB:
+      return sizeof(std::byte);
+    case Datatype::BOOL:
+      return sizeof(uint8_t);
     case Datatype::INT8:
       return sizeof(int8_t);
     case Datatype::UINT8:
@@ -132,6 +142,10 @@ inline const std::string& datatype_str(Datatype type) {
       return constants::float64_str;
     case Datatype::CHAR:
       return constants::char_str;
+    case Datatype::BLOB:
+      return constants::blob_str;
+    case Datatype::BOOL:
+      return constants::bool_str;
     case Datatype::INT8:
       return constants::int8_str;
     case Datatype::UINT8:
@@ -220,6 +234,10 @@ inline Status datatype_enum(
     *datatype = Datatype::FLOAT64;
   else if (datatype_str == constants::char_str)
     *datatype = Datatype::CHAR;
+  else if (datatype_str == constants::blob_str)
+    *datatype = Datatype::BLOB;
+  else if (datatype_str == constants::bool_str)
+    *datatype = Datatype::BOOL;
   else if (datatype_str == constants::int8_str)
     *datatype = Datatype::INT8;
   else if (datatype_str == constants::uint8_str)
@@ -291,7 +309,7 @@ inline Status datatype_enum(
   else if (datatype_str == constants::time_as_str)
     *datatype = Datatype::TIME_AS;
   else {
-    return Status::Error("Invalid Datatype " + datatype_str);
+    return Status_Error("Invalid Datatype " + datatype_str);
   }
   return Status::Ok();
 }
@@ -307,6 +325,7 @@ inline bool datatype_is_string(Datatype type) {
 /** Returns true if the input datatype is an integer type. */
 inline bool datatype_is_integer(Datatype type) {
   return (
+      type == Datatype::BLOB || type == Datatype::BOOL ||
       type == Datatype::INT8 || type == Datatype::UINT8 ||
       type == Datatype::INT16 || type == Datatype::UINT16 ||
       type == Datatype::INT32 || type == Datatype::UINT32 ||
@@ -338,6 +357,82 @@ inline bool datatype_is_time(Datatype type) {
       type == Datatype::TIME_US || type == Datatype::TIME_NS ||
       type == Datatype::TIME_PS || type == Datatype::TIME_FS ||
       type == Datatype::TIME_AS);
+}
+
+/** Returns true if the input datatype is a boolean type. */
+inline bool datatype_is_boolean(Datatype type) {
+  return (type == Datatype::BOOL);
+}
+
+/** Throws error if the input Datatype's enum is not between 0 and 41. */
+inline void ensure_datatype_is_valid(uint8_t datatype_enum) {
+  if (datatype_enum > 41) {
+    throw std::runtime_error(
+        "Invalid Datatype (" + std::to_string(datatype_enum) + ")");
+  }
+}
+
+/** Throws error if the input Datatype's enum is not between 0 and 41. */
+inline void ensure_datatype_is_valid(Datatype type) {
+  ensure_datatype_is_valid(::stdx::to_underlying(type));
+}
+
+/** Throws error if:
+ *
+ * the datatype string is not valid as a datatype.
+ * the datatype string's enum is not between 0 and 41.
+ **/
+inline void ensure_datatype_is_valid(const std::string& datatype_str) {
+  Datatype datatype_type;
+  Status st{datatype_enum(datatype_str, &datatype_type)};
+  if (!st.ok()) {
+    throw std::runtime_error(
+        "Invalid Datatype string (\"" + datatype_str + "\")");
+  }
+  ensure_datatype_is_valid(datatype_type);
+}
+
+inline void ensure_dimension_datatype_is_valid(Datatype type) {
+  switch (type) {
+    case Datatype::INT32:
+    case Datatype::INT64:
+    case Datatype::FLOAT32:
+    case Datatype::FLOAT64:
+    case Datatype::INT8:
+    case Datatype::UINT8:
+    case Datatype::INT16:
+    case Datatype::UINT16:
+    case Datatype::UINT32:
+    case Datatype::UINT64:
+    case Datatype::STRING_ASCII:
+    case Datatype::DATETIME_YEAR:
+    case Datatype::DATETIME_MONTH:
+    case Datatype::DATETIME_WEEK:
+    case Datatype::DATETIME_DAY:
+    case Datatype::DATETIME_HR:
+    case Datatype::DATETIME_MIN:
+    case Datatype::DATETIME_SEC:
+    case Datatype::DATETIME_MS:
+    case Datatype::DATETIME_US:
+    case Datatype::DATETIME_NS:
+    case Datatype::DATETIME_PS:
+    case Datatype::DATETIME_FS:
+    case Datatype::DATETIME_AS:
+    case Datatype::TIME_HR:
+    case Datatype::TIME_MIN:
+    case Datatype::TIME_SEC:
+    case Datatype::TIME_MS:
+    case Datatype::TIME_US:
+    case Datatype::TIME_NS:
+    case Datatype::TIME_PS:
+    case Datatype::TIME_FS:
+    case Datatype::TIME_AS:
+      return;
+    default:
+      throw std::runtime_error(
+          "Datatype '" + datatype_str(type) +
+          "' is not a valid dimension datatype.");
+  }
 }
 
 }  // namespace sm

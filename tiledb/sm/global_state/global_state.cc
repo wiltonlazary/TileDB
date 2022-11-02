@@ -32,7 +32,6 @@
 
 #include "tiledb/sm/global_state/global_state.h"
 #include "tiledb/sm/global_state/libcurl_state.h"
-#include "tiledb/sm/global_state/openssl_state.h"
 #include "tiledb/sm/global_state/signal_handlers.h"
 #include "tiledb/sm/global_state/watchdog.h"
 #include "tiledb/sm/misc/constants.h"
@@ -62,26 +61,24 @@ GlobalState::GlobalState() {
   initialized_ = false;
 }
 
-Status GlobalState::init(const Config* config) {
+Status GlobalState::init(const Config& config) {
   std::unique_lock<std::mutex> lck(init_mtx_);
 
   // Get config params
   bool found;
   bool enable_signal_handlers = false;
-  RETURN_NOT_OK(config_.get<bool>(
+  RETURN_NOT_OK(config.get<bool>(
       "sm.enable_signal_handlers", &enable_signal_handlers, &found));
   assert(found);
 
   // run these operations once
   if (!initialized_) {
-    if (config != nullptr) {
-      config_ = *config;
-    }
+    config_ = config;
+
     if (enable_signal_handlers) {
       RETURN_NOT_OK(SignalHandlers::GetSignalHandlers().initialize());
     }
     RETURN_NOT_OK(Watchdog::GetWatchdog().initialize());
-    RETURN_NOT_OK(init_openssl());
     RETURN_NOT_OK(init_libcurl());
 
 #ifdef __linux__
@@ -89,9 +86,8 @@ Status GlobalState::init(const Config* config) {
     // This only needs to happen one time, and then we will use the file found
     // for each s3/rest call as appropriate
     Posix posix;
-    ThreadPool tp;
-    tp.init();
-    posix.init(config_, &tp);
+    ThreadPool tp{1};
+    throw_if_not_ok(posix.init(config_, &tp));
     cert_file_ = utils::https::find_ca_certs_linux(posix);
 #endif
 
@@ -114,21 +110,6 @@ void GlobalState::unregister_storage_manager(StorageManager* sm) {
 std::set<StorageManager*> GlobalState::storage_managers() {
   std::unique_lock<std::mutex> lck(storage_managers_mtx_);
   return storage_managers_;
-}
-
-OpenArrayMemoryTracker* GlobalState::array_memory_tracker(
-    const URI& array_uri, StorageManager* caller) {
-  std::unique_lock<std::mutex> lck(storage_managers_mtx_);
-  for (auto& storage_manager : storage_managers_) {
-    if (storage_manager == caller)
-      continue;
-
-    auto tracker = storage_manager->array_memory_tracker(array_uri, false);
-    if (tracker != nullptr)
-      return tracker;
-  }
-
-  return nullptr;
 }
 
 const std::string& GlobalState::cert_file() {

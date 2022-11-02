@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -34,6 +34,7 @@
 #include <limits>
 #include <thread>
 
+#include "tiledb/common/common.h"
 #include "tiledb/sm/c_api/tiledb_version.h"
 
 // Include files for platform path max definition.
@@ -71,14 +72,26 @@ const unsigned rtree_fanout = 10;
 /** The array schema file name. */
 const std::string array_schema_filename = "__array_schema.tdb";
 
-/** The array schema folder name. */
-const std::string array_schema_folder_name = "__schema";
+/** The array schema directory name. */
+const std::string array_schema_dir_name = "__schema";
 
-/** The array metadata folder name. */
-const std::string array_metadata_folder_name = "__meta";
+/** The array metadata directory name. */
+const std::string array_metadata_dir_name = "__meta";
+
+/** The array fragment metadata directory name. */
+const std::string array_fragment_meta_dir_name = "__fragment_meta";
+
+/** The array fragments directory name. */
+const std::string array_fragments_dir_name = "__fragments";
+
+/** The array commit directory name. */
+const std::string array_commits_dir_name = "__commits";
 
 /** The fragment metadata file name. */
 const std::string fragment_metadata_filename = "__fragment_metadata.tdb";
+
+/** The array dimension labels directory name. */
+const std::string array_dimension_labels_dir_name = "__labels";
 
 /** The default tile capacity. */
 const uint64_t capacity = 10000;
@@ -113,6 +126,24 @@ int cell_validity_compression_level = -1;
 /** Special name reserved for the coordinates attribute. */
 const std::string coords = "__coords";
 
+/** Special name reserved for the timestamp attribute. */
+const std::string timestamps = "__timestamps";
+
+/** Special name reserved for the delete timestamp attribute. */
+const std::string delete_timestamps = "__delete_timestamps";
+
+/** Special name reserved for the delete condition index attribute. */
+const std::string delete_condition_index = "__delete_condition_index";
+
+/** The size of a timestamp cell. */
+const uint64_t timestamp_size = sizeof(uint64_t);
+
+/** The type of a timestamp cell. */
+extern const Datatype timestamp_type = Datatype::UINT64;
+
+/** The type of a delete condition index cell. */
+extern const Datatype delete_condition_index_type = Datatype::UINT64;
+
 /** The default compressor for the coordinates. */
 Compressor coords_compression = Compressor::ZSTD;
 
@@ -121,9 +152,6 @@ Compressor real_coords_compression = Compressor::ZSTD;
 
 /** The default compression level for the coordinates. */
 int coords_compression_level = -1;
-
-/** The filelock name. */
-const std::string filelock_name = "__lock.tdb";
 
 /** The special value for an empty int32. */
 const int empty_int32 = std::numeric_limits<int32_t>::min();
@@ -139,6 +167,12 @@ const double empty_float64 = std::numeric_limits<double>::quiet_NaN();
 
 /** The special value for an empty char. */
 const char empty_char = std::numeric_limits<char>::min();
+
+/** The special value for an empty blob. */
+constexpr std::byte empty_blob{0};
+
+/** The special value for an empty bool. */
+const uint8_t empty_bool = 0;
 
 /** The special value for an empty int8. */
 const int8_t empty_int8 = std::numeric_limits<int8_t>::min();
@@ -188,8 +222,23 @@ const std::string vacuum_file_suffix = ".vac";
 /** Suffix for the special ok files used in TileDB. */
 const std::string ok_file_suffix = ".ok";
 
+/** Suffix for the special write files used in TileDB. */
+const std::string write_file_suffix = ".wrt";
+
+/** Suffix for the special delete files used in TileDB. */
+const std::string delete_file_suffix = ".del";
+
+/** Suffix for the special update files used in TileDB. */
+const std::string update_file_suffix = ".upd";
+
 /** Suffix for the special metadata files used in TileDB. */
 const std::string meta_file_suffix = ".meta";
+
+/** Suffix for the special commits files used in TileDB. */
+const std::string con_commits_file_suffix = ".con";
+
+/** Suffix for the special ignore files used in TileDB. */
+const std::string ignore_file_suffix = ".ign";
 
 /** Default datatype for a generic tile. */
 const Datatype generic_tile_datatype = Datatype::CHAR;
@@ -205,6 +254,12 @@ uint64_t generic_tile_cell_size = sizeof(char);
 
 /** The group file name. */
 const std::string group_filename = "__tiledb_group.tdb";
+
+/** The group details directory name. */
+const std::string group_detail_dir_name = "__group";
+
+/** The group metadata directory name. */
+const std::string group_metadata_dir_name = "__meta";
 
 /** The maximum number of bytes written in a single I/O. */
 const uint64_t max_write_bytes = std::numeric_limits<int>::max();
@@ -228,6 +283,15 @@ const std::string query_type_read_str = "READ";
 
 /** TILEDB_WRITE Query String **/
 const std::string query_type_write_str = "WRITE";
+
+/** TILEDB_DELETE Query String **/
+const std::string query_type_delete_str = "DELETE";
+
+/** TILEDB_UPDATE Query String **/
+const std::string query_type_update_str = "UPDATE";
+
+/** TILEDB_MODIFY_EXCLUSIVE Query String **/
+const std::string query_type_modify_exclusive_str = "MODIFY_EXCLUSIVE";
 
 /** TILEDB_FAILED Query String **/
 const std::string query_status_failed_str = "FAILED";
@@ -325,6 +389,15 @@ const std::string filter_checksum_md5_str = "CHECKSUM_MD5";
 /** String describing FILTER_CHECKSUM_SHA256. */
 const std::string filter_checksum_sha256_str = "CHECKSUM_SHA256";
 
+/** String describing FILTER_DICTIONARY. */
+const std::string filter_dictionary_str = "DICTIONARY_ENCODING";
+
+/** String describing FILTER_SCALE_FLOAT. */
+const std::string filter_scale_float_str = "SCALE_FLOAT";
+
+/** String describing FILTER_XOR. */
+const std::string filter_xor_str = "XOR";
+
 /** The string representation for FilterOption type compression_level. */
 const std::string filter_option_compression_level_str = "COMPRESSION_LEVEL";
 
@@ -332,10 +405,19 @@ const std::string filter_option_compression_level_str = "COMPRESSION_LEVEL";
 const std::string filter_option_bit_width_max_window_str =
     "BIT_WIDTH_MAX_WINDOW";
 
-/** The string representation for FilterOption type positive_delta_max_window.
+/** The string representation for FilterOption type positives_delta_max_window.
  */
 const std::string filter_option_positive_delta_max_window_str =
     "POSITIVE_DELTA_MAX_WINDOW";
+
+/** The string representation for FilterOption type scale_float_bytewidth. */
+const std::string filter_option_scale_float_bytewidth = "SCALE_FLOAT_BYTEWIDTH";
+
+/** The string representation for FilterOption type scale_float_factor. */
+const std::string filter_option_scale_float_factor = "SCALE_FLOAT_FACTOR";
+
+/** The string representation for FilterOption type scale_float_offset. */
+const std::string filter_option_scale_float_offset = "SCALE_FLOAT_OFFSET";
 
 /** The string representation for type int32. */
 const std::string int32_str = "INT32";
@@ -351,6 +433,12 @@ const std::string float64_str = "FLOAT64";
 
 /** The string representation for type char. */
 const std::string char_str = "CHAR";
+
+/** The string representation for type blob. */
+const std::string blob_str = "BLOB";
+
+/** The string representation for type bool. */
+const std::string bool_str = "BOOL";
 
 /** The string representation for type int8. */
 const std::string int8_str = "INT8";
@@ -481,6 +569,15 @@ const std::string hilbert_str = "hilbert";
 /** The string representation of null. */
 const std::string null_str = "null";
 
+/** The string representation of unordered label. */
+const std::string label_unordered_str = "unordered";
+
+/** The string representation of increasing order label. */
+const std::string label_increasing_str = "increasing";
+
+/** The string representation of decreasing order label. */
+const std::string label_decreasing_str = "decreasing";
+
 /** The string representation for object type invalid. */
 const std::string object_type_invalid_str = "INVALID";
 
@@ -524,11 +621,31 @@ const std::string vfsmode_append_str = "VFS_APPEND";
 const int32_t library_version[3] = {
     TILEDB_VERSION_MAJOR, TILEDB_VERSION_MINOR, TILEDB_VERSION_PATCH};
 
-/** The TileDB serialization format version number. */
-const uint32_t format_version = 10;
+/** The TileDB serialization base format version number. */
+const format_version_t base_format_version = 16;
+
+/**
+ * The TileDB serialization format version number.
+ *
+ * Conditionally set the high bit on the base_format_version to
+ * easily identify that the build is experimental.
+ **/
+const format_version_t format_version =
+    is_experimental_build ?
+        0b10000000000000000000000000000000 | base_format_version :
+        base_format_version;
 
 /** The lowest version supported for back compat writes. */
-const uint32_t back_compat_writes_min_format_version = 7;
+const format_version_t back_compat_writes_min_format_version = 7;
+
+/** The lowest version supported for consolidation with timestamps. */
+const format_version_t consolidation_with_timestamps_min_version = 15;
+
+/** The lowest version supported for deletes. */
+const format_version_t deletes_min_version = 16;
+
+/** The lowest version supported for updates. */
+const format_version_t updates_min_version = 16;
 
 /** The maximum size of a tile chunk (unit of compression) in bytes. */
 const uint64_t max_tile_chunk_size = 64 * 1024;
@@ -572,8 +689,46 @@ const unsigned concurrent_attr_reads = 2;
 /** The redirection header key in REST response. */
 extern const std::string redirection_header_key = "location";
 
+/** String describing MIME_AUTODETECT. */
+const std::string mime_autodetect_str = "AUTODETECT";
+
+/** String describing MIME_TIFF. */
+const std::string mime_tiff_str = "image/tiff";
+
+/** String describing MIME_PDF. */
+const std::string mime_pdf_str = "application/pdf";
+
+/** The default tile extent used in filestore arrays. */
+const uint64_t filestore_default_tile_extent = 1024;
+
+/** Name of the single dimension used in filestore arrays. */
+const std::string filestore_dimension_name = "position";
+
+/** Name of the single attribute used in filestore arrays. */
+const std::string filestore_attribute_name = "contents";
+
+/** Name of the metadata key used in filestore arrays for current size. */
+const std::string filestore_metadata_size_key = "file_size";
+
+/** Name of the metadata key used in filestore arrays for mime type. */
+const std::string filestore_metadata_mime_type_key = "mime_type";
+
+/** Name of the metadata key used in filestore arrays for mime encoding. */
+const std::string filestore_metadata_mime_encoding_key = "mime_encoding";
+
+/** Name of the metadata key used in filestore arrays for original filename. */
+const std::string filestore_metadata_original_filename_key =
+    "original_file_name";
+
+/** Name of the metadata key used in filestore arrays for filename extension. */
+const std::string filestore_metadata_file_extension_key = "file_extension";
+
 const void* fill_value(Datatype type) {
   switch (type) {
+    case Datatype::BLOB:
+      return &constants::empty_blob;
+    case Datatype::BOOL:
+      return &constants::empty_bool;
     case Datatype::INT8:
       return &constants::empty_int8;
     case Datatype::UINT8:

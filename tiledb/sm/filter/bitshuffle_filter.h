@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -86,6 +86,8 @@ class BitshuffleFilter : public Filter {
    * Shuffle the bits of the input data into the output data buffer.
    */
   Status run_forward(
+      const Tile& tile,
+      Tile* const tile_offsets,
       FilterBuffer* input_metadata,
       FilterBuffer* input,
       FilterBuffer* output_metadata,
@@ -95,6 +97,8 @@ class BitshuffleFilter : public Filter {
    * Unshuffle the bits of the input data into the output data buffer.
    */
   Status run_reverse(
+      const Tile& tile,
+      Tile* const tile_offsets,
       FilterBuffer* input_metadata,
       FilterBuffer* input,
       FilterBuffer* output_metadata,
@@ -123,7 +127,8 @@ class BitshuffleFilter : public Filter {
    * @param output Buffer to hold shuffled data.
    * @return Status
    */
-  Status shuffle_part(const ConstBuffer* part, Buffer* output) const;
+  Status shuffle_part(
+      const Tile& tile, const ConstBuffer* part, Buffer* output) const;
 
   /**
    * Perform bit unshuffling on the given input buffer.
@@ -132,7 +137,8 @@ class BitshuffleFilter : public Filter {
    * @param output Buffer to hold unshuffled data.
    * @return Status
    */
-  Status unshuffle_part(const ConstBuffer* input, Buffer* output) const;
+  Status unshuffle_part(
+      const Tile& tile, const ConstBuffer* part, Buffer* output) const;
 };
 
 }  // namespace sm

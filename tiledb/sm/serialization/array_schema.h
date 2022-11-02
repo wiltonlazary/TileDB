@@ -37,6 +37,10 @@
 
 #include "tiledb/common/status.h"
 
+#ifdef TILEDB_SERIALIZATION
+#include "tiledb/sm/serialization/capnp_utils.h"
+#endif
+
 using namespace tiledb::common;
 
 namespace tiledb {
@@ -50,6 +54,52 @@ enum class SerializationType : uint8_t;
 
 namespace serialization {
 
+#ifdef TILEDB_SERIALIZATION
+/**
+ * Serialize a filter to cap'n proto object
+ *
+ * @param filter Filter to serialize.
+ * @param filter_builder Cap'n proto class.
+ * @return Status
+ */
+Status filter_to_capnp(
+    const Filter* filter, capnp::Filter::Builder* filter_builder);
+
+/**
+ * Deserialize a filter from a cap'n proto object
+ *
+ * @param filter_reader Cap'n proto object
+ * @return Status
+ */
+tuple<Status, optional<shared_ptr<Filter>>> filter_from_capnp(
+    const capnp::Filter::Reader& filter_reader);
+
+/**
+ * Serialize an array schema to cap'n proto object
+ *
+ * @param array_schema Array schema to serialize
+ * @param array_schema_builder Cap'n proto class
+ * @param client_side indicate if client or server side. If server side we won't
+ * serialize the array URI
+ * @return Status
+ */
+Status array_schema_to_capnp(
+    const ArraySchema& array_schema,
+    capnp::ArraySchema::Builder* array_schema_builder,
+    const bool client_side);
+
+/**
+ * Deserialize an array schema from a cap'n proto object
+ *
+ * @param schema_reader Cap'n proto object
+ * @param uri A URI object
+ * @return a new ArraySchema
+ */
+ArraySchema array_schema_from_capnp(
+    const capnp::ArraySchema::Reader& schema_reader, const URI& uri);
+
+#endif  // TILEDB_SERIALIZATION
+
 /**
  * Serialize an array schema via Cap'n Prto
  * @param array_schema schema object to serialize
@@ -60,15 +110,13 @@ namespace serialization {
  * @return
  */
 Status array_schema_serialize(
-    ArraySchema* array_schema,
+    const ArraySchema& array_schema,
     SerializationType serialize_type,
     Buffer* serialized_buffer,
     const bool client_side);
 
-Status array_schema_deserialize(
-    ArraySchema** array_schema,
-    SerializationType serialize_type,
-    const Buffer& serialized_buffer);
+ArraySchema array_schema_deserialize(
+    SerializationType serialize_type, const Buffer& serialized_buffer);
 
 Status nonempty_domain_serialize(
     const Array* array,
@@ -99,19 +147,11 @@ Status max_buffer_sizes_serialize(
     Buffer* serialized_buffer);
 
 Status max_buffer_sizes_deserialize(
-    const ArraySchema* schema,
+    const ArraySchema& schema,
     const Buffer& serialized_buffer,
     SerializationType serialize_type,
     std::unordered_map<std::string, std::pair<uint64_t, uint64_t>>*
         buffer_sizes);
-
-Status array_metadata_serialize(
-    Array* array, SerializationType serialize_type, Buffer* serialized_buffer);
-
-Status array_metadata_deserialize(
-    Array* array,
-    SerializationType serialize_type,
-    const Buffer& serialized_buffer);
 
 }  // namespace serialization
 }  // namespace sm

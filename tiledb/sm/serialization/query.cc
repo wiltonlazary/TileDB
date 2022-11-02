@@ -1,11 +1,11 @@
 /**
- * @file   query.cc
+ * @file query.cc
  *
  * @section LICENSE
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB, Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB, Inc.
  * @copyright Copyright (c) 2016 MIT and Intel Corporation
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -31,15 +31,20 @@
  * This file defines serialization for the Query class
  */
 
+#include <sstream>
+
 // clang-format off
 #ifdef TILEDB_SERIALIZATION
 #include <capnp/compat/json.h>
 #include <capnp/message.h>
 #include <capnp/serialize.h>
+#include "tiledb/sm/serialization/array.h"
+#include "tiledb/sm/serialization/array_schema.h"
 #include "tiledb/sm/serialization/capnp_utils.h"
 #endif
 // clang-format on
 
+#include "tiledb/common/common.h"
 #include "tiledb/common/heap_memory.h"
 #include "tiledb/common/logger.h"
 #include "tiledb/sm/array/array.h"
@@ -51,14 +56,19 @@
 #include "tiledb/sm/enums/query_type.h"
 #include "tiledb/sm/enums/serialization_type.h"
 #include "tiledb/sm/fragment/fragment_metadata.h"
-#include "tiledb/sm/misc/utils.h"
+#include "tiledb/sm/misc/hash.h"
+#include "tiledb/sm/misc/parse_argument.h"
+#include "tiledb/sm/query/ast/query_ast.h"
+#include "tiledb/sm/query/deletes_and_updates/deletes_and_updates.h"
+#include "tiledb/sm/query/legacy/reader.h"
 #include "tiledb/sm/query/query.h"
-#include "tiledb/sm/query/reader.h"
-#include "tiledb/sm/query/dense_reader.h"
-#include "tiledb/sm/query/sparse_global_order_reader.h"
-#include "tiledb/sm/query/sparse_unordered_with_dups_reader.h"
-#include "tiledb/sm/query/writer.h"
+#include "tiledb/sm/query/readers/dense_reader.h"
+#include "tiledb/sm/query/readers/sparse_global_order_reader.h"
+#include "tiledb/sm/query/readers/sparse_unordered_with_dups_reader.h"
+#include "tiledb/sm/query/writers/global_order_writer.h"
+#include "tiledb/sm/query/writers/writer_base.h"
 #include "tiledb/sm/serialization/config.h"
+#include "tiledb/sm/serialization/fragment_metadata.h"
 #include "tiledb/sm/serialization/query.h"
 #include "tiledb/sm/subarray/subarray.h"
 #include "tiledb/sm/subarray/subarray_partitioner.h"
@@ -72,7 +82,7 @@ namespace serialization {
 
 #ifdef TILEDB_SERIALIZATION
 
-enum class SerializationContext { CLIENT, SERVER, BACKUP };
+shared_ptr<Logger> dummy_logger = make_shared<Logger>(HERE(), "");
 
 Status stats_to_capnp(Stats& stats, capnp::Stats::Builder* stats_builder) {
   // Build counters
@@ -116,7 +126,7 @@ Status stats_from_capnp(
 
   if (stats_reader.hasTimers()) {
     auto timers = stats->timers();
-    auto timers_reader = stats_reader.getCounters();
+    auto timers_reader = stats_reader.getTimers();
     for (const auto entry : timers_reader.getEntries()) {
       (*timers)[std::string(entry.getKey().cStr())] = entry.getValue();
     }
@@ -125,26 +135,8 @@ Status stats_from_capnp(
   return Status::Ok();
 }
 
-Status array_to_capnp(
-    const Array& array, capnp::Array::Builder* array_builder) {
-  array_builder->setUri(array.array_uri().to_string());
-  array_builder->setStartTimestamp(array.timestamp_start());
-  array_builder->setEndTimestamp(array.timestamp_end());
-
-  return Status::Ok();
-}
-
-Status array_from_capnp(
-    const capnp::Array::Reader& array_reader, Array* array) {
-  RETURN_NOT_OK(array->set_uri(array_reader.getUri().cStr()));
-  RETURN_NOT_OK(array->set_timestamp_start(array_reader.getStartTimestamp()));
-  RETURN_NOT_OK(array->set_timestamp_end(array_reader.getEndTimestamp()));
-
-  return Status::Ok();
-}
-
 Status subarray_to_capnp(
-    const ArraySchema* schema,
+    const ArraySchema& schema,
     const Subarray* subarray,
     capnp::Subarray::Builder* builder) {
   builder->setLayout(layout_str(subarray->layout()));
@@ -152,7 +144,7 @@ Status subarray_to_capnp(
   const uint32_t dim_num = subarray->dim_num();
   auto ranges_builder = builder->initRanges(dim_num);
   for (uint32_t i = 0; i < dim_num; i++) {
-    const auto datatype = schema->dimension(i)->type();
+    const auto datatype{schema.dimension_ptr(i)->type()};
     auto range_builder = ranges_builder[i];
     const auto& ranges = subarray->ranges_for_dim(i);
     range_builder.setType(datatype_str(datatype));
@@ -181,6 +173,14 @@ Status subarray_to_capnp(
   if (stats != nullptr) {
     auto stats_builder = builder->initStats();
     RETURN_NOT_OK(stats_to_capnp(*stats, &stats_builder));
+  }
+
+  if (subarray->relevant_fragments()->size() > 0) {
+    auto relevant_fragments_builder =
+        builder->initRelevantFragments(subarray->relevant_fragments()->size());
+    for (size_t i = 0; i < subarray->relevant_fragments()->size(); ++i) {
+      relevant_fragments_builder.set(i, subarray->relevant_fragments()->at(i));
+    }
   }
 
   return Status::Ok();
@@ -236,17 +236,26 @@ Status subarray_from_capnp(
     }
   }
 
+  if (reader.hasRelevantFragments()) {
+    auto relevant_fragments = reader.getRelevantFragments();
+    size_t count = relevant_fragments.size();
+    subarray->relevant_fragments()->reserve(count);
+    for (size_t i = 0; i < count; i++) {
+      subarray->relevant_fragments()->emplace_back(relevant_fragments[i]);
+    }
+  }
+
   return Status::Ok();
 }
 
 Status subarray_partitioner_to_capnp(
-    const ArraySchema* schema,
+    const ArraySchema& schema,
     const SubarrayPartitioner& partitioner,
     capnp::SubarrayPartitioner::Builder* builder) {
   // Subarray
   auto subarray_builder = builder->initSubarray();
   RETURN_NOT_OK(
-      subarray_to_capnp(schema, partitioner.subarray(), &subarray_builder));
+      subarray_to_capnp(schema, &partitioner.subarray(), &subarray_builder));
 
   // Per-attr/dim mem budgets
   const auto* budgets = partitioner.get_result_budgets();
@@ -257,7 +266,7 @@ Status subarray_partitioner_to_capnp(
       const std::string& name = pair.first;
       auto budget_builder = mem_budgets_builder[idx];
       budget_builder.setAttribute(name);
-      auto var_size = schema->var_size(name);
+      auto var_size = schema.var_size(name);
 
       if (name == constants::coords || !var_size) {
         budget_builder.setOffsetBytes(0);
@@ -327,8 +336,9 @@ Status subarray_partitioner_to_capnp(
 }
 
 Status subarray_partitioner_from_capnp(
+    Stats* query_stats,
     Stats* reader_stats,
-    const Config* config,
+    const Config& config,
     const Array* array,
     const capnp::SubarrayPartitioner::Reader& reader,
     SubarrayPartitioner* partitioner,
@@ -349,27 +359,28 @@ Status subarray_partitioner_from_capnp(
   RETURN_NOT_OK(layout_enum(subarray_reader.getLayout(), &layout));
 
   // Subarray, which is used to initialize the partitioner.
-  Subarray subarray(array, layout, reader_stats, false);
+  Subarray subarray(array, layout, query_stats, dummy_logger, false);
   RETURN_NOT_OK(subarray_from_capnp(reader.getSubarray(), &subarray));
   *partitioner = SubarrayPartitioner(
-      config,
+      &config,
       subarray,
       memory_budget,
       memory_budget_var,
       memory_budget_validity,
       compute_tp,
-      reader_stats);
+      reader_stats,
+      dummy_logger);
 
   // Per-attr mem budgets
   if (reader.hasBudget()) {
-    const ArraySchema* schema = array->array_schema();
+    const auto& schema = array->array_schema_latest();
     auto mem_budgets_reader = reader.getBudget();
     auto num_attrs = mem_budgets_reader.size();
     for (size_t i = 0; i < num_attrs; i++) {
       auto mem_budget_reader = mem_budgets_reader[i];
       std::string attr_name = mem_budget_reader.getAttribute();
-      auto var_size = schema->var_size(attr_name);
-      auto nullable = schema->is_nullable(attr_name);
+      auto var_size = schema.var_size(attr_name);
+      auto nullable = schema.is_nullable(attr_name);
 
       if (attr_name == constants::coords || !var_size) {
         if (nullable) {
@@ -406,17 +417,18 @@ Status subarray_partitioner_from_capnp(
     partition_info->end_ = partition_info_reader.getEnd();
     partition_info->split_multi_range_ =
         partition_info_reader.getSplitMultiRange();
-    partition_info->partition_ = Subarray(array, layout, reader_stats, false);
+    partition_info->partition_ =
+        Subarray(array, layout, query_stats, dummy_logger, false);
     RETURN_NOT_OK(subarray_from_capnp(
         partition_info_reader.getSubarray(), &partition_info->partition_));
 
     if (compute_current_tile_overlap) {
-      partition_info->partition_.precompute_tile_overlap(
+      throw_if_not_ok(partition_info->partition_.precompute_tile_overlap(
           partition_info->start_,
           partition_info->end_,
-          config,
+          &config,
           compute_tp,
-          true);
+          true));
     }
   }
 
@@ -429,7 +441,8 @@ Status subarray_partitioner_from_capnp(
   const unsigned num_sr = sr_reader.size();
   for (unsigned i = 0; i < num_sr; i++) {
     auto subarray_reader_ = sr_reader[i];
-    state->single_range_.emplace_back(array, layout, reader_stats, false);
+    state->single_range_.emplace_back(
+        array, layout, query_stats, dummy_logger, false);
     Subarray& subarray_ = state->single_range_.back();
     RETURN_NOT_OK(subarray_from_capnp(subarray_reader_, &subarray_));
   }
@@ -437,7 +450,8 @@ Status subarray_partitioner_from_capnp(
   const unsigned num_m = m_reader.size();
   for (unsigned i = 0; i < num_m; i++) {
     auto subarray_reader_ = m_reader[i];
-    state->multi_range_.emplace_back(array, layout, reader_stats, false);
+    state->multi_range_.emplace_back(
+        array, layout, query_stats, dummy_logger, false);
     Subarray& subarray_ = state->multi_range_.back();
     RETURN_NOT_OK(subarray_from_capnp(subarray_reader_, &subarray_));
   }
@@ -461,7 +475,7 @@ Status subarray_partitioner_from_capnp(
 }
 
 Status read_state_to_capnp(
-    const ArraySchema* schema,
+    const ArraySchema& schema,
     const Reader& reader,
     capnp::QueryReader::Builder* builder) {
   auto read_state = reader.read_state();
@@ -484,29 +498,21 @@ Status index_read_state_to_capnp(
     capnp::ReaderIndex::Builder* builder) {
   auto read_state_builder = builder->initReadState();
 
-  auto rcs_builder = read_state_builder.initResultCellSlab(
-      read_state->result_cell_slabs_.size());
-  for (size_t i = 0; i < read_state->result_cell_slabs_.size(); ++i) {
-    rcs_builder[i].setFragIdx(
-        read_state->result_cell_slabs_[i].tile_->frag_idx());
-    rcs_builder[i].setTileIdx(
-        read_state->result_cell_slabs_[i].tile_->tile_idx());
-    rcs_builder[i].setStart(read_state->result_cell_slabs_[i].start_);
-    rcs_builder[i].setLength(read_state->result_cell_slabs_[i].length_);
-  }
+  read_state_builder.setDoneAddingResultTiles(
+      read_state->done_adding_result_tiles_);
 
   auto frag_tile_idx_builder =
-      read_state_builder.initFragTileIdx(read_state->frag_tile_idx_.size());
-  for (size_t i = 0; i < read_state->frag_tile_idx_.size(); ++i) {
-    frag_tile_idx_builder[i].setTileIdx(read_state->frag_tile_idx_[i].first);
-    frag_tile_idx_builder[i].setCellIdx(read_state->frag_tile_idx_[i].second);
+      read_state_builder.initFragTileIdx(read_state->frag_idx_.size());
+  for (size_t i = 0; i < read_state->frag_idx_.size(); ++i) {
+    frag_tile_idx_builder[i].setTileIdx(read_state->frag_idx_[i].tile_idx_);
+    frag_tile_idx_builder[i].setCellIdx(read_state->frag_idx_[i].cell_idx_);
   }
 
   return Status::Ok();
 }
 
 Status dense_read_state_to_capnp(
-    const ArraySchema* schema,
+    const ArraySchema& schema,
     const DenseReader& reader,
     capnp::QueryReader::Builder* builder) {
   auto read_state = reader.read_state();
@@ -539,6 +545,7 @@ Status read_state_from_capnp(
   // Subarray partitioner
   if (read_state_reader.hasSubarrayPartitioner()) {
     RETURN_NOT_OK(subarray_partitioner_from_capnp(
+        query->stats(),
         reader->stats(),
         query->config(),
         array,
@@ -555,49 +562,21 @@ Status read_state_from_capnp(
 }
 
 Status index_read_state_from_capnp(
-    const ArraySchema* schema,
+    const ArraySchema& schema,
     const capnp::ReadStateIndex::Reader& read_state_reader,
     SparseIndexReaderBase* reader) {
   auto read_state = reader->read_state();
-  auto dim_num = schema->dim_num();
-  const auto* domain = schema->domain();
 
-  assert(read_state_reader.hasResultCellSlab());
-  RETURN_NOT_OK(reader->clear_result_tiles());
-  read_state->result_cell_slabs_.clear();
-
-  std::unordered_map<
-      std::pair<unsigned, uint64_t>,
-      ResultTile*,
-      tiledb::sm::utils::hash::pair_hash>
-      result_tile_map;
-  for (const auto rcs : read_state_reader.getResultCellSlab()) {
-    auto start = rcs.getStart();
-    auto length = rcs.getLength();
-    auto frag_idx = rcs.getFragIdx();
-    auto tile_idx = rcs.getTileIdx();
-
-    ResultTile* rt = nullptr;
-    auto it =
-        result_tile_map.find(std::pair<unsigned, uint64_t>(frag_idx, tile_idx));
-    if (it != result_tile_map.end()) {
-      rt = it->second;
-    } else {
-      rt = reader->add_result_tile_unsafe(dim_num, frag_idx, tile_idx, domain);
-      result_tile_map.emplace(
-          std::pair<unsigned, uint64_t>(frag_idx, tile_idx), rt);
-    }
-
-    read_state->result_cell_slabs_.emplace_back(rt, start, length);
-  }
+  read_state->done_adding_result_tiles_ =
+      read_state_reader.getDoneAddingResultTiles();
 
   assert(read_state_reader.hasFragTileIdx());
-  read_state->frag_tile_idx_.clear();
+  read_state->frag_idx_.clear();
   for (const auto rcs : read_state_reader.getFragTileIdx()) {
     auto tile_idx = rcs.getTileIdx();
     auto cell_idx = rcs.getCellIdx();
 
-    read_state->frag_tile_idx_.emplace_back(tile_idx, cell_idx);
+    read_state->frag_idx_.emplace_back(tile_idx, cell_idx);
   }
 
   return Status::Ok();
@@ -618,6 +597,7 @@ Status dense_read_state_from_capnp(
   // Subarray partitioner
   if (read_state_reader.hasSubarrayPartitioner()) {
     RETURN_NOT_OK(subarray_partitioner_from_capnp(
+        query->stats(),
         reader->stats(),
         query->config(),
         array,
@@ -633,43 +613,164 @@ Status dense_read_state_from_capnp(
   return Status::Ok();
 }
 
+/**
+ * @brief Validation function for the field name of an AST node.
+ *
+ * @param field_name Query Condition AST node field name.
+ */
+void ensure_qc_field_name_is_valid(const std::string& field_name) {
+  if (field_name == "") {
+    throw std::runtime_error(
+        "Invalid Query Condition field name " + field_name);
+  }
+}
+
+/**
+ * @brief Validation function for the condition value of an AST node.
+ *
+ * @param data Query Condition AST node condition value byte vector start.
+ * @param size The number of bytes in the byte vector.
+ */
+void ensure_qc_condition_value_is_valid(const void* data, size_t size) {
+  if (size != 0 && data == nullptr) {
+    // Getting the address of data in string form.
+    std::ostringstream address;
+    address << data;
+    std::string address_name = address.str();
+    throw std::runtime_error(
+        "Invalid Query Condition condition value " + address_name +
+        " with size " + std::to_string(size));
+  }
+}
+
+/**
+ * @brief Validation function for the capnp representation of the
+ * condition value of an AST node.
+ *
+ * @param vec The vector representing the Query Condition AST node
+ * condition vector.
+ */
+void ensure_qc_capnp_condition_value_is_valid(const kj::Vector<uint8_t>& vec) {
+  ensure_qc_condition_value_is_valid(vec.begin(), vec.size());
+}
+
+static Status condition_ast_to_capnp(
+    const tdb_unique_ptr<ASTNode>& node, capnp::ASTNode::Builder* ast_builder) {
+  if (!node->is_expr()) {
+    // Store the boolean expression tag.
+    ast_builder->setIsExpression(false);
+
+    // Validate and store the field name.
+    const std::string field_name = node->get_field_name();
+    ensure_qc_field_name_is_valid(field_name);
+    ast_builder->setFieldName(field_name);
+
+    // Copy the condition value into a capnp vector of bytes.
+    const UntypedDatumView& value = node->get_condition_value_view();
+    auto capnpValue = kj::Vector<uint8_t>();
+    capnpValue.addAll(kj::ArrayPtr<uint8_t>(
+        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.content())),
+        value.size()));
+
+    // Validate and store the condition value vector of bytes.
+    ensure_qc_capnp_condition_value_is_valid(capnpValue);
+    ast_builder->setValue(capnpValue.asPtr());
+
+    // Validate and store the query condition op.
+    const std::string op_str = query_condition_op_str(node->get_op());
+    ensure_qc_op_string_is_valid(op_str);
+    ast_builder->setOp(op_str);
+  } else {
+    // Store the boolean expression tag.
+    ast_builder->setIsExpression(true);
+
+    // We assume that the serialized values of the child nodes are validated
+    // properly.
+    auto children_builder =
+        ast_builder->initChildren(node->get_children().size());
+
+    for (size_t i = 0; i < node->get_children().size(); ++i) {
+      auto child_builder = children_builder[i];
+      throw_if_not_ok(
+          condition_ast_to_capnp(node->get_children()[i], &child_builder));
+    }
+
+    // Validate and store the query condition combination op.
+    const std::string op_str =
+        query_condition_combination_op_str(node->get_combination_op());
+    ensure_qc_combo_op_string_is_valid(op_str);
+    ast_builder->setCombinationOp(op_str);
+  }
+  return Status::Ok();
+}
+
+static void clause_to_capnp(
+    const tdb_unique_ptr<ASTNode>& node,
+    capnp::ConditionClause::Builder* clause_builder) {
+  // Validate and store the field name.
+  std::string field_name = node->get_field_name();
+  ensure_qc_field_name_is_valid(field_name);
+  clause_builder->setFieldName(field_name);
+
+  // Copy the condition value into a capnp vector of bytes.
+  const UntypedDatumView& value = node->get_condition_value_view();
+  auto capnpValue = kj::Vector<uint8_t>();
+  capnpValue.addAll(kj::ArrayPtr<uint8_t>(
+      const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.content())),
+      value.size()));
+
+  // Validate and store the condition value vector of bytes.
+  ensure_qc_capnp_condition_value_is_valid(capnpValue);
+  clause_builder->setValue(capnpValue.asPtr());
+
+  // Validate and store the query condition op.
+  const std::string op_str = query_condition_op_str(node->get_op());
+  ensure_qc_op_string_is_valid(op_str);
+  clause_builder->setOp(op_str);
+}
+
 Status condition_to_capnp(
     const QueryCondition& condition,
     capnp::Condition::Builder* condition_builder) {
-  // Serialize the clauses.
-  const std::vector<QueryCondition::Clause> clauses = condition.clauses();
-  assert(!clauses.empty());
-  auto clause_builder = condition_builder->initClauses(clauses.size());
-  for (size_t i = 0; i < clauses.size(); ++i) {
-    clause_builder[i].setFieldName(clauses[i].field_name_);
+  const tdb_unique_ptr<ASTNode>& ast = condition.ast();
+  assert(!condition.empty());
 
-    // Copy the condition value into a capnp vector of bytes.
-    const ByteVecValue value = clauses[i].condition_value_data_;
-    auto capnpValue = kj::Vector<uint8_t>();
-    capnpValue.addAll(kj::ArrayPtr<uint8_t>(
-        const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(value.data())),
-        value.size()));
+  // Validate and store the query condition AST.
+  auto ast_builder = condition_builder->initTree();
+  RETURN_NOT_OK(condition_ast_to_capnp(ast, &ast_builder));
 
-    // Store the condition value vector of bytes.
-    clause_builder[i].setValue(capnpValue.asPtr());
+  // For backwards compatability, we should also set the clauses and combination
+  // ops vectors when the current query condition.
+  if (ast->is_backwards_compatible()) {
+    if (ast->is_expr()) {
+      // We assume that the serialized values of the clauses are validated
+      // properly.
+      const std::vector<tdb_unique_ptr<ASTNode>>& clauses_vec =
+          ast->get_children();
+      auto clauses_builder = condition_builder->initClauses(clauses_vec.size());
+      for (size_t i = 0; i < clauses_vec.size(); ++i) {
+        auto clause_builder = clauses_builder[i];
+        clause_to_capnp(clauses_vec[i], &clause_builder);
+      }
 
-    const std::string op_str = query_condition_op_str(clauses[i].op_);
-    clause_builder[i].setOp(op_str);
-  }
-
-  // Serialize the combination ops.
-  const std::vector<QueryConditionCombinationOp> combination_ops =
-      condition.combination_ops();
-  if (!combination_ops.empty()) {
-    auto combination_ops_builder =
-        condition_builder->initClauseCombinationOps(combination_ops.size());
-    for (size_t i = 0; i < combination_ops.size(); ++i) {
-      const std::string op_str =
-          query_condition_combination_op_str(combination_ops[i]);
-      combination_ops_builder.set(i, op_str);
+      // Validating and storing the combination op vector.
+      if (clauses_vec.size() > 1) {
+        auto combination_ops_builder =
+            condition_builder->initClauseCombinationOps(clauses_vec.size() - 1);
+        for (size_t i = 0; i < clauses_vec.size() - 1; ++i) {
+          const std::string op_str = query_condition_combination_op_str(
+              QueryConditionCombinationOp::AND);
+          ensure_qc_combo_op_string_is_valid(op_str);
+          combination_ops_builder.set(i, op_str);
+        }
+      }
+    } else {
+      // We assume the serialized value of the clause is verified properly.
+      auto clauses_builder = condition_builder->initClauses(1);
+      auto clause_builder = clauses_builder[0];
+      clause_to_capnp(ast, &clause_builder);
     }
   }
-
   return Status::Ok();
 }
 
@@ -677,7 +778,7 @@ Status reader_to_capnp(
     const Query& query,
     const Reader& reader,
     capnp::QueryReader::Builder* reader_builder) {
-  auto array_schema = query.array_schema();
+  const auto& array_schema = query.array_schema();
 
   // Subarray layout
   const auto& layout = layout_str(query.layout());
@@ -691,10 +792,10 @@ Status reader_to_capnp(
   // Read state
   RETURN_NOT_OK(read_state_to_capnp(array_schema, reader, reader_builder));
 
-  const QueryCondition* condition = query.condition();
-  if (!condition->empty()) {
+  const auto& condition = query.condition();
+  if (!condition.empty()) {
     auto condition_builder = reader_builder->initCondition();
-    RETURN_NOT_OK(condition_to_capnp(*condition, &condition_builder));
+    RETURN_NOT_OK(condition_to_capnp(condition, &condition_builder));
   }
 
   // If stats object exists set its cap'n proto object
@@ -711,7 +812,7 @@ Status index_reader_to_capnp(
     const Query& query,
     const SparseIndexReaderBase& reader,
     capnp::ReaderIndex::Builder* reader_builder) {
-  auto array_schema = query.array_schema();
+  const auto& array_schema = query.array_schema();
 
   // Subarray layout
   const auto& layout = layout_str(query.layout());
@@ -725,10 +826,10 @@ Status index_reader_to_capnp(
   // Read state
   RETURN_NOT_OK(index_read_state_to_capnp(reader.read_state(), reader_builder));
 
-  const QueryCondition* condition = query.condition();
-  if (!condition->empty()) {
+  const auto& condition = query.condition();
+  if (!condition.empty()) {
     auto condition_builder = reader_builder->initCondition();
-    RETURN_NOT_OK(condition_to_capnp(*condition, &condition_builder));
+    RETURN_NOT_OK(condition_to_capnp(condition, &condition_builder));
   }
 
   // If stats object exists set its cap'n proto object
@@ -745,7 +846,7 @@ Status dense_reader_to_capnp(
     const Query& query,
     const DenseReader& reader,
     capnp::QueryReader::Builder* reader_builder) {
-  auto array_schema = query.array_schema();
+  const auto& array_schema = query.array_schema();
 
   // Subarray layout
   const auto& layout = layout_str(query.layout());
@@ -760,10 +861,10 @@ Status dense_reader_to_capnp(
   RETURN_NOT_OK(
       dense_read_state_to_capnp(array_schema, reader, reader_builder));
 
-  const QueryCondition* condition = query.condition();
-  if (!condition->empty()) {
+  const auto& condition = query.condition();
+  if (!condition.empty()) {
     auto condition_builder = reader_builder->initCondition();
-    RETURN_NOT_OK(condition_to_capnp(*condition, &condition_builder));
+    RETURN_NOT_OK(condition_to_capnp(condition, &condition_builder));
   }
 
   // If stats object exists set its cap'n proto object
@@ -776,42 +877,101 @@ Status dense_reader_to_capnp(
   return Status::Ok();
 }
 
+tdb_unique_ptr<ASTNode> condition_ast_from_capnp(
+    const capnp::ASTNode::Reader& ast_reader) {
+  if (!ast_reader.getIsExpression()) {
+    // Getting and validating the field name.
+    std::string field_name = ast_reader.getFieldName();
+    ensure_qc_field_name_is_valid(field_name);
+
+    // Getting and validating the condition value.
+    auto condition_value = ast_reader.getValue();
+    const void* data =
+        static_cast<const void*>(condition_value.asBytes().begin());
+    size_t size = condition_value.size();
+    ensure_qc_condition_value_is_valid(data, size);
+
+    // Getting and validating the query condition operator.
+    QueryConditionOp op = QueryConditionOp::LT;
+    Status s = query_condition_op_enum(ast_reader.getOp(), &op);
+    if (!s.ok()) {
+      throw std::runtime_error(
+          "condition_ast_from_capnp: query_condition_op_enum failed.");
+    }
+    ensure_qc_op_is_valid(op);
+
+    return tdb_unique_ptr<ASTNode>(
+        tdb_new(ASTNodeVal, field_name, data, size, op));
+  }
+
+  // Getting and validating the query condition combination operator.
+  std::string combination_op_str = ast_reader.getCombinationOp();
+  QueryConditionCombinationOp combination_op = QueryConditionCombinationOp::AND;
+  Status s =
+      query_condition_combination_op_enum(combination_op_str, &combination_op);
+  if (!s.ok()) {
+    throw std::runtime_error(
+        "condition_ast_from_capnp: query_condition_combination_op_enum "
+        "failed.");
+  }
+  ensure_qc_combo_op_is_valid(combination_op);
+
+  // We assume that the deserialized values of the child nodes are validated
+  // properly.
+  std::vector<tdb_unique_ptr<ASTNode>> ast_nodes;
+  for (const auto child : ast_reader.getChildren()) {
+    ast_nodes.push_back(condition_ast_from_capnp(child));
+  }
+  return tdb_unique_ptr<ASTNode>(
+      tdb_new(ASTNodeExpr, std::move(ast_nodes), combination_op));
+}
+
 Status condition_from_capnp(
     const capnp::Condition::Reader& condition_reader,
     QueryCondition* const condition) {
-  // Deserialize the clauses.
-  std::vector<QueryCondition::Clause> clauses;
-  assert(condition_reader.hasClauses());
-  for (const auto clause : condition_reader.getClauses()) {
-    std::string field_name = clause.getFieldName();
+  if (condition_reader.hasClauses()) {  // coming from older API
+    // Accumulating the AST value nodes from the clause list.
+    std::vector<tdb_unique_ptr<ASTNode>> ast_nodes;
+    for (const auto clause : condition_reader.getClauses()) {
+      // Getting and validating the field name.
+      std::string field_name = clause.getFieldName();
+      ensure_qc_field_name_is_valid(field_name);
 
-    auto condition_value = clause.getValue();
+      // Getting and validating the condition value.
+      auto condition_value = clause.getValue();
+      const void* data =
+          static_cast<const void*>(condition_value.asBytes().begin());
+      size_t size = condition_value.size();
+      ensure_qc_condition_value_is_valid(data, size);
 
-    QueryConditionOp op = QueryConditionOp::LT;
-    RETURN_NOT_OK(query_condition_op_enum(clause.getOp(), &op));
+      // Getting and validating the query condition operator.
+      QueryConditionOp op = QueryConditionOp::LT;
+      Status s = query_condition_op_enum(clause.getOp(), &op);
+      if (!s.ok()) {
+        throw std::runtime_error(
+            "condition_ast_from_capnp: query_condition_op_enum failed.");
+      }
+      ensure_qc_op_is_valid(op);
 
-    clauses.emplace_back(
-        std::move(field_name),
-        condition_value.asBytes().begin(),
-        condition_value.size(),
-        op);
-  }
-  condition->set_clauses(std::move(clauses));
-
-  // Deserialize the combination ops.
-  if (condition_reader.hasClauseCombinationOps()) {
-    std::vector<QueryConditionCombinationOp> combination_ops;
-    for (const auto combination_op_str :
-         condition_reader.getClauseCombinationOps()) {
-      QueryConditionCombinationOp combination_op =
-          QueryConditionCombinationOp::AND;
-      RETURN_NOT_OK(query_condition_combination_op_enum(
-          combination_op_str, &combination_op));
-      combination_ops.emplace_back(combination_op);
+      ast_nodes.push_back(tdb_unique_ptr<ASTNode>(
+          tdb_new(ASTNodeVal, field_name, data, size, op)));
     }
-    condition->set_combination_ops(std::move(combination_ops));
-  }
 
+    // Constructing the tree from the list of AST nodes.
+    assert(ast_nodes.size() > 0);
+    if (ast_nodes.size() == 1) {
+      condition->set_ast(std::move(ast_nodes[0]));
+    } else {
+      auto tree_ptr = tdb_unique_ptr<ASTNode>(tdb_new(
+          ASTNodeExpr, std::move(ast_nodes), QueryConditionCombinationOp::AND));
+      condition->set_ast(std::move(tree_ptr));
+    }
+  } else if (condition_reader.hasTree()) {
+    // Constructing the query condition from the AST representation.
+    // We assume that the deserialized values of the AST are validated properly.
+    auto ast_reader = condition_reader.getTree();
+    condition->set_ast(condition_ast_from_capnp(ast_reader));
+  }
   return Status::Ok();
 }
 
@@ -825,10 +985,9 @@ Status reader_from_capnp(
   // Layout
   Layout layout = Layout::ROW_MAJOR;
   RETURN_NOT_OK(layout_enum(reader_reader.getLayout(), &layout));
-  RETURN_NOT_OK(query->set_layout_unsafe(layout));
 
   // Subarray
-  Subarray subarray(array, layout, reader->stats(), false);
+  Subarray subarray(array, layout, query->stats(), dummy_logger, false);
   auto subarray_reader = reader_reader.getSubarray();
   RETURN_NOT_OK(subarray_from_capnp(subarray_reader, &subarray));
   RETURN_NOT_OK(query->set_subarray_unsafe(subarray));
@@ -859,7 +1018,7 @@ Status reader_from_capnp(
 }
 
 Status index_reader_from_capnp(
-    const ArraySchema* schema,
+    const ArraySchema& schema,
     const capnp::ReaderIndex::Reader& reader_reader,
     Query* query,
     SparseIndexReaderBase* reader) {
@@ -870,7 +1029,7 @@ Status index_reader_from_capnp(
   RETURN_NOT_OK(layout_enum(reader_reader.getLayout(), &layout));
 
   // Subarray
-  Subarray subarray(array, layout, reader->stats(), false);
+  Subarray subarray(array, layout, query->stats(), dummy_logger, false);
   auto subarray_reader = reader_reader.getSubarray();
   RETURN_NOT_OK(subarray_from_capnp(subarray_reader, &subarray));
   RETURN_NOT_OK(query->set_subarray_unsafe(subarray));
@@ -901,7 +1060,7 @@ Status index_reader_from_capnp(
 }
 
 Status dense_reader_from_capnp(
-    const ArraySchema* schema,
+    const ArraySchema& schema,
     const capnp::QueryReader::Reader& reader_reader,
     Query* query,
     DenseReader* reader,
@@ -913,7 +1072,7 @@ Status dense_reader_from_capnp(
   RETURN_NOT_OK(layout_enum(reader_reader.getLayout(), &layout));
 
   // Subarray
-  Subarray subarray(array, layout, reader->stats(), false);
+  Subarray subarray(array, layout, query->stats(), dummy_logger, false);
   auto subarray_reader = reader_reader.getSubarray();
   RETURN_NOT_OK(subarray_from_capnp(subarray_reader, &subarray));
   RETURN_NOT_OK(query->set_subarray_unsafe(subarray));
@@ -943,17 +1102,62 @@ Status dense_reader_from_capnp(
   return Status::Ok();
 }
 
+Status delete_from_capnp(
+    const capnp::Delete::Reader& delete_reader,
+    Query* query,
+    DeletesAndUpdates* delete_strategy) {
+  // Query condition
+  if (delete_reader.hasCondition()) {
+    auto condition_reader = delete_reader.getCondition();
+    QueryCondition condition;
+    RETURN_NOT_OK(condition_from_capnp(condition_reader, &condition));
+    RETURN_NOT_OK(query->set_condition(condition));
+  }
+
+  // If cap'n proto object has stats set it on c++ object
+  if (delete_reader.hasStats()) {
+    stats::Stats* stats = delete_strategy->stats();
+    // We should always have a stats here
+    if (stats != nullptr) {
+      RETURN_NOT_OK(stats_from_capnp(delete_reader.getStats(), stats));
+    }
+  }
+
+  return Status::Ok();
+}
+
+Status delete_to_capnp(
+    const Query& query,
+    DeletesAndUpdates& delete_strategy,
+    capnp::Delete::Builder* delete_builder) {
+  auto condition = query.condition();
+  if (!condition.empty()) {
+    auto condition_builder = delete_builder->initCondition();
+    RETURN_NOT_OK(condition_to_capnp(condition, &condition_builder));
+  }
+
+  // If stats object exists set its cap'n proto object
+  stats::Stats* stats = delete_strategy.stats();
+  if (stats != nullptr) {
+    auto stats_builder = delete_builder->initStats();
+    RETURN_NOT_OK(stats_to_capnp(*stats, &stats_builder));
+  }
+
+  return Status::Ok();
+}
+
 Status writer_to_capnp(
     const Query& query,
-    Writer& writer,
-    capnp::Writer::Builder* writer_builder) {
+    WriterBase& writer,
+    capnp::Writer::Builder* writer_builder,
+    bool client_side) {
   writer_builder->setCheckCoordDups(writer.get_check_coord_dups());
   writer_builder->setCheckCoordOOB(writer.get_check_coord_oob());
   writer_builder->setDedupCoords(writer.get_dedup_coords());
 
-  const auto* array_schema = query.array_schema();
+  const auto& array_schema = query.array_schema();
 
-  if (array_schema->dense()) {
+  if (array_schema.dense()) {
     std::vector<uint8_t> subarray_flat;
     RETURN_NOT_OK(query.subarray()->to_byte_vec(&subarray_flat));
     auto subarray_builder = writer_builder->initSubarray();
@@ -976,11 +1180,28 @@ Status writer_to_capnp(
     RETURN_NOT_OK(stats_to_capnp(*stats, &stats_builder));
   }
 
+  if (query.layout() == Layout::GLOBAL_ORDER) {
+    auto& globalwriter = dynamic_cast<GlobalOrderWriter&>(writer);
+    auto globalstate = globalwriter.get_global_state();
+    // Remote global order writes have global_write_state equal to nullptr
+    // before the first submit(). The state gets initialized when do_work() gets
+    // invoked. Once GlobalOrderWriter becomes C41 compliant, we can delete this
+    // check.
+    if (globalstate) {
+      auto global_state_builder = writer_builder->initGlobalWriteStateV1();
+      RETURN_NOT_OK(global_write_state_to_capnp(
+          query, globalwriter, &global_state_builder, client_side));
+    }
+  }
+
   return Status::Ok();
 }
 
 Status writer_from_capnp(
-    const capnp::Writer::Reader& writer_reader, Writer* writer) {
+    const Query& query,
+    const capnp::Writer::Reader& writer_reader,
+    WriterBase* writer,
+    const SerializationContext context) {
   writer->set_check_coord_dups(writer_reader.getCheckCoordDups());
   writer->set_check_coord_oob(writer_reader.getCheckCoordOOB());
   writer->set_dedup_coords(writer_reader.getDedupCoords());
@@ -994,33 +1215,44 @@ Status writer_from_capnp(
     }
   }
 
+  if (query.layout() == Layout::GLOBAL_ORDER &&
+      writer_reader.hasGlobalWriteStateV1()) {
+    auto global_writer = dynamic_cast<GlobalOrderWriter*>(writer);
+
+    // global_write_state is not allocated when deserializing into a
+    // new Query object
+    if (!global_writer->get_global_state()) {
+      RETURN_NOT_OK(global_writer->alloc_global_write_state());
+      RETURN_NOT_OK(global_writer->init_global_write_state());
+    }
+    RETURN_NOT_OK(global_write_state_from_capnp(
+        query, writer_reader.getGlobalWriteStateV1(), global_writer, context));
+  }
+
   return Status::Ok();
 }
 
-Status query_to_capnp(Query& query, capnp::Query::Builder* query_builder) {
+Status query_to_capnp(
+    Query& query,
+    capnp::Query::Builder* query_builder,
+    const bool client_side) {
   // For easy reference
   auto layout = query.layout();
   auto type = query.type();
   auto array = query.array();
 
-  if (layout == Layout::GLOBAL_ORDER && query.type() == QueryType::WRITE)
-    return LOG_STATUS(
-        Status::SerializationError("Cannot serialize; global order "
-                                   "serialization not supported for writes."));
+  if (query.uses_dimension_labels()) {
+    return LOG_STATUS(Status_SerializationError(
+        "Cannot serialize; serialization is not yet supported for queries "
+        "using dimension labels."));
+  }
 
-  if (array == nullptr)
+  if (array == nullptr) {
     return LOG_STATUS(
-        Status::SerializationError("Cannot serialize; array is null."));
+        Status_SerializationError("Cannot serialize; array is null."));
+  }
 
-  const auto* schema = query.array_schema();
-  if (schema == nullptr)
-    return LOG_STATUS(
-        Status::SerializationError("Cannot serialize; array schema is null."));
-
-  const auto* domain = schema->domain();
-  if (domain == nullptr)
-    return LOG_STATUS(
-        Status::SerializationError("Cannot serialize; array domain is null."));
+  const auto& schema = query.array_schema();
 
   // Serialize basic fields
   query_builder->setType(query_type_str(type));
@@ -1030,7 +1262,7 @@ Status query_to_capnp(Query& query, capnp::Query::Builder* query_builder) {
   // Serialize array
   if (query.array() != nullptr) {
     auto builder = query_builder->initArray();
-    RETURN_NOT_OK(array_to_capnp(*array, &builder));
+    RETURN_NOT_OK(array_to_capnp(array, &builder, client_side));
   }
 
   // Serialize attribute buffer metadata
@@ -1088,74 +1320,70 @@ Status query_to_capnp(Query& query, capnp::Query::Builder* query_builder) {
 
   if (type == QueryType::READ) {
     bool all_dense = true;
-    for (auto& frag_md : array->fragment_metadata())
+    for (auto& frag_md : array->fragment_metadata()) {
       all_dense &= frag_md->dense();
-    bool found = false;
-    bool use_refactored_readers = false;
-    RETURN_NOT_OK(query.config()->get<bool>(
-        "sm.use_refactored_readers", &use_refactored_readers, &found));
-    assert(found);
-    if (use_refactored_readers && !schema->dense() &&
-        layout == Layout::GLOBAL_ORDER) {
-      auto builder = query_builder->initReaderIndex();
-      auto reader = (SparseGlobalOrderReader*)query.strategy();
+    }
 
-      query_builder->setVarOffsetsMode(reader->offsets_mode());
-      query_builder->setVarOffsetsAddExtraElement(
-          reader->offsets_extra_element());
-      query_builder->setVarOffsetsBitsize(reader->offsets_bitsize());
-      RETURN_NOT_OK(index_reader_to_capnp(query, *reader, &builder));
-    } else if (
-        use_refactored_readers && !schema->dense() &&
-        layout == Layout::UNORDERED && schema->allows_dups()) {
-      auto builder = query_builder->initReaderIndex();
-      auto reader = (SparseUnorderedWithDupsReader*)query.strategy();
+    auto reader = dynamic_cast<ReaderBase*>(query.strategy(true));
+    query_builder->setVarOffsetsMode(reader->offsets_mode());
+    query_builder->setVarOffsetsAddExtraElement(
+        reader->offsets_extra_element());
+    query_builder->setVarOffsetsBitsize(reader->offsets_bitsize());
 
-      query_builder->setVarOffsetsMode(reader->offsets_mode());
-      query_builder->setVarOffsetsAddExtraElement(
-          reader->offsets_extra_element());
-      query_builder->setVarOffsetsBitsize(reader->offsets_bitsize());
+    if (query.use_refactored_sparse_unordered_with_dups_reader(
+            layout, schema) ||
+        query.use_refactored_sparse_global_order_reader(layout, schema)) {
+      auto builder = query_builder->initReaderIndex();
+      auto reader = dynamic_cast<SparseIndexReaderBase*>(query.strategy(true));
       RETURN_NOT_OK(index_reader_to_capnp(query, *reader, &builder));
-    } else if (use_refactored_readers && all_dense && schema->dense()) {
+    } else if (query.use_refactored_dense_reader(schema, all_dense)) {
       auto builder = query_builder->initDenseReader();
-      auto reader = (DenseReader*)query.strategy();
-
-      query_builder->setVarOffsetsMode(reader->offsets_mode());
-      query_builder->setVarOffsetsAddExtraElement(
-          reader->offsets_extra_element());
-      query_builder->setVarOffsetsBitsize(reader->offsets_bitsize());
+      auto reader = dynamic_cast<DenseReader*>(query.strategy(true));
       RETURN_NOT_OK(dense_reader_to_capnp(query, *reader, &builder));
     } else {
       auto builder = query_builder->initReader();
-      auto reader = (Reader*)query.strategy();
-
-      query_builder->setVarOffsetsMode(reader->offsets_mode());
-      query_builder->setVarOffsetsAddExtraElement(
-          reader->offsets_extra_element());
-      query_builder->setVarOffsetsBitsize(reader->offsets_bitsize());
+      auto reader = dynamic_cast<Reader*>(query.strategy());
       RETURN_NOT_OK(reader_to_capnp(query, *reader, &builder));
     }
-  } else {
+  } else if (type == QueryType::WRITE) {
     auto builder = query_builder->initWriter();
-    auto writer = (Writer*)query.strategy();
+    auto writer = dynamic_cast<WriterBase*>(query.strategy(true));
 
     query_builder->setVarOffsetsMode(writer->offsets_mode());
     query_builder->setVarOffsetsAddExtraElement(
         writer->offsets_extra_element());
     query_builder->setVarOffsetsBitsize(writer->offsets_bitsize());
-    RETURN_NOT_OK(writer_to_capnp(query, *writer, &builder));
+    RETURN_NOT_OK(writer_to_capnp(query, *writer, &builder, client_side));
+  } else {
+    auto builder = query_builder->initDelete();
+    auto delete_strategy =
+        dynamic_cast<DeletesAndUpdates*>(query.strategy(true));
+    RETURN_NOT_OK(delete_to_capnp(query, *delete_strategy, &builder));
   }
 
   // Serialize Config
-  const Config* config = query.config();
   auto config_builder = query_builder->initConfig();
-  RETURN_NOT_OK(config_to_capnp(config, &config_builder));
+  RETURN_NOT_OK(config_to_capnp(query.config(), &config_builder));
 
   // If stats object exists set its cap'n proto object
   stats::Stats* stats = query.stats();
   if (stats != nullptr) {
     auto stats_builder = query_builder->initStats();
     RETURN_NOT_OK(stats_to_capnp(*stats, &stats_builder));
+  }
+
+  auto& written_fragment_info = query.get_written_fragment_info();
+  if (!written_fragment_info.empty()) {
+    auto builder =
+        query_builder->initWrittenFragmentInfo(written_fragment_info.size());
+    for (uint64_t i = 0; i < written_fragment_info.size(); ++i) {
+      builder[i].setUri(written_fragment_info[i]
+                            .uri_.remove_trailing_slash()
+                            .last_path_part());
+      auto range_builder = builder[i].initTimestampRange(2);
+      range_builder.set(0, written_fragment_info[i].timestamp_range_.first);
+      range_builder.set(1, written_fragment_info[i].timestamp_range_.second);
+    }
   }
 
   return Status::Ok();
@@ -1172,36 +1400,50 @@ Status query_from_capnp(
 
   auto type = query->type();
   auto array = query->array();
+  const auto& schema = query->array_schema();
 
-  const auto* schema = query->array_schema();
-  if (schema == nullptr)
-    return LOG_STATUS(Status::SerializationError(
-        "Cannot deserialize; array schema is null."));
-
-  const auto* domain = schema->domain();
-  if (domain == nullptr)
-    return LOG_STATUS(Status::SerializationError(
-        "Cannot deserialize; array domain is null."));
-
-  if (array == nullptr)
-    return LOG_STATUS(Status::SerializationError(
+  if (array == nullptr) {
+    return LOG_STATUS(Status_SerializationError(
         "Cannot deserialize; array pointer is null."));
+  }
 
   // Deserialize query type (sanity check).
   QueryType query_type = QueryType::READ;
   RETURN_NOT_OK(query_type_enum(query_reader.getType().cStr(), &query_type));
-  if (query_type != type)
-    return LOG_STATUS(Status::SerializationError(
+  if (query_type != type) {
+    return LOG_STATUS(Status_SerializationError(
         "Cannot deserialize; Query opened for " + query_type_str(type) +
         " but got serialized type for " + query_reader.getType().cStr()));
+  }
+
+  if (query_type != QueryType::READ && query_type != QueryType::WRITE &&
+      query_type != QueryType::DELETE &&
+      query_type != QueryType::MODIFY_EXCLUSIVE) {
+    return LOG_STATUS(Status_SerializationError(
+        "Cannot deserialize; Unsupported query type."));
+  }
 
   // Deserialize layout.
   Layout layout = Layout::UNORDERED;
   RETURN_NOT_OK(layout_enum(query_reader.getLayout().cStr(), &layout));
-  RETURN_NOT_OK(query->set_layout_unsafe(layout));
 
   // Deserialize array instance.
   RETURN_NOT_OK(array_from_capnp(query_reader.getArray(), array));
+
+  // Marks the query as remote
+  // Needs to happen before the reset strategy call below so that the marker
+  // propagates to the underlying strategy. Also this marker needs to live
+  // on the Query not on the strategy because for the first remote submit,
+  // the strategy gets reset once more during query submit on the server side
+  // (much later).
+  if (context == SerializationContext::SERVER) {
+    query->set_remote_query();
+  }
+
+  // Make sure we have the right query strategy in place.
+  bool force_legacy_reader =
+      query_type == QueryType::READ && query_reader.hasReader();
+  RETURN_NOT_OK(query->reset_strategy_with_layout(layout, force_legacy_reader));
 
   // Deserialize Config
   if (query_reader.hasConfig()) {
@@ -1214,9 +1456,10 @@ Status query_from_capnp(
   }
 
   // Deserialize and set attribute buffers.
-  if (!query_reader.hasAttributeBufferHeaders())
-    return LOG_STATUS(Status::SerializationError(
+  if (!query_reader.hasAttributeBufferHeaders()) {
+    return LOG_STATUS(Status_SerializationError(
         "Cannot deserialize; no attribute buffer headers in message."));
+  }
 
   auto buffer_headers = query_reader.getAttributeBufferHeaders();
   auto attribute_buffer_start = static_cast<char*>(buffer_start);
@@ -1248,12 +1491,12 @@ Status query_from_capnp(
     uint64_t* existing_offset_buffer_size_ptr = nullptr;
     uint64_t* existing_validity_buffer_size_ptr = nullptr;
 
-    auto var_size = schema->var_size(name);
-    auto nullable = schema->is_nullable(name);
+    auto var_size = schema.var_size(name);
+    auto nullable = schema.is_nullable(name);
     if (type == QueryType::READ && context == SerializationContext::SERVER) {
       const QueryBuffer& query_buffer = query->buffer(name);
       // We use the query_buffer directly in order to get the original buffer
-      // sizes This avoid a problem where an incomplete query will change the
+      // sizes. This avoid a problem where an incomplete query will change the
       // users buffer size to the smaller results and we end up not being able
       // to correctly calculate if the new results can fit into the users buffer
       if (var_size) {
@@ -1283,7 +1526,7 @@ Status query_from_capnp(
               query_buffer.original_validity_vector_size_;
         }
       }
-    } else {
+    } else if (query_type == QueryType::WRITE || type == QueryType::READ) {
       // For writes we need to use get_buffer and clientside
       if (var_size) {
         if (!nullable) {
@@ -1338,6 +1581,8 @@ Status query_from_capnp(
             existing_validity_buffer_size = *existing_validity_buffer_size_ptr;
         }
       }
+    } else {
+      // Delete queries have nothing to deserialize.
     }
 
     if (context == SerializationContext::CLIENT) {
@@ -1367,7 +1612,7 @@ Status query_from_capnp(
           (var_size && offset_size_left >= fixedlen_size) || !var_size;
       const bool has_mem_for_validity = validity_size_left >= validitylen_size;
       if (!has_mem_for_data || !has_mem_for_offset || !has_mem_for_validity) {
-        return LOG_STATUS(Status::SerializationError(
+        return LOG_STATUS(Status_SerializationError(
             "Error deserializing read query; buffer too small for buffer "
             "'" +
             name + "'."));
@@ -1487,7 +1732,7 @@ Status query_from_capnp(
       // Always expect null buffers when deserializing.
       if (existing_buffer != nullptr || existing_offset_buffer != nullptr ||
           existing_validity_buffer != nullptr)
-        return LOG_STATUS(Status::SerializationError(
+        return LOG_STATUS(Status_SerializationError(
             "Error deserializing read query; unexpected "
             "buffer set on server-side."));
 
@@ -1563,7 +1808,7 @@ Status query_from_capnp(
                 false));
           }
         }
-      } else {
+      } else if (query_type == QueryType::WRITE) {
         // On writes, just set buffer pointers wrapping the data in the message.
         if (var_size) {
           auto* offsets = reinterpret_cast<uint64_t*>(attribute_buffer_start);
@@ -1634,6 +1879,8 @@ Status query_from_capnp(
                 &attr_state->validity_len_size));
           }
         }
+      } else {
+        // Delete queries have no buffers to deserialize.
       }
     }
   }
@@ -1643,101 +1890,45 @@ Status query_from_capnp(
   // on the reader or writer directly Now we set it on the query class after the
   // heterogeneous coordinate changes
   if (type == QueryType::READ) {
-    if (query_reader.hasReaderIndex() && !schema->dense() &&
-        layout == Layout::GLOBAL_ORDER) {
-      // Strategy needs to be cleared here to create the correct reader.
-      query->clear_strategy();
-      RETURN_NOT_OK(query->set_layout_unsafe(layout));
+    auto reader = dynamic_cast<ReaderBase*>(query->strategy());
+    if (query_reader.hasVarOffsetsMode()) {
+      RETURN_NOT_OK(reader->set_offsets_mode(query_reader.getVarOffsetsMode()));
+    }
 
-      auto reader_reader = query_reader.getReaderIndex();
-      auto reader = (SparseGlobalOrderReader*)query->strategy();
+    RETURN_NOT_OK(reader->set_offsets_extra_element(
+        query_reader.getVarOffsetsAddExtraElement()));
 
-      if (query_reader.hasVarOffsetsMode()) {
-        RETURN_NOT_OK(
-            reader->set_offsets_mode(query_reader.getVarOffsetsMode()));
-      }
-
-      RETURN_NOT_OK(reader->set_offsets_extra_element(
-          query_reader.getVarOffsetsAddExtraElement()));
-
-      if (query_reader.getVarOffsetsBitsize() > 0) {
-        RETURN_NOT_OK(
-            reader->set_offsets_bitsize(query_reader.getVarOffsetsBitsize()));
-      }
-
+    if (query_reader.getVarOffsetsBitsize() > 0) {
       RETURN_NOT_OK(
-          index_reader_from_capnp(schema, reader_reader, query, reader));
-    } else if (
-        query_reader.hasReaderIndex() && !schema->dense() &&
-        layout == Layout::UNORDERED && schema->allows_dups()) {
-      // Strategy needs to be cleared here to create the correct reader.
-      query->clear_strategy();
-      RETURN_NOT_OK(query->set_layout_unsafe(layout));
+          reader->set_offsets_bitsize(query_reader.getVarOffsetsBitsize()));
+    }
 
+    if (query_reader.hasReaderIndex()) {
       auto reader_reader = query_reader.getReaderIndex();
-      auto reader = (SparseUnorderedWithDupsReader*)query->strategy();
-
-      if (query_reader.hasVarOffsetsMode()) {
-        RETURN_NOT_OK(
-            reader->set_offsets_mode(query_reader.getVarOffsetsMode()));
-      }
-
-      RETURN_NOT_OK(reader->set_offsets_extra_element(
-          query_reader.getVarOffsetsAddExtraElement()));
-
-      if (query_reader.getVarOffsetsBitsize() > 0) {
-        RETURN_NOT_OK(
-            reader->set_offsets_bitsize(query_reader.getVarOffsetsBitsize()));
-      }
-
-      RETURN_NOT_OK(
-          index_reader_from_capnp(schema, reader_reader, query, reader));
+      RETURN_NOT_OK(index_reader_from_capnp(
+          schema,
+          reader_reader,
+          query,
+          dynamic_cast<SparseIndexReaderBase*>(query->strategy())));
     } else if (query_reader.hasDenseReader()) {
-      // Strategy needs to be cleared here to create the correct reader.
-      query->clear_strategy();
-      RETURN_NOT_OK(query->set_layout_unsafe(layout));
-
       auto reader_reader = query_reader.getDenseReader();
-      auto reader = (DenseReader*)query->strategy();
-
-      if (query_reader.hasVarOffsetsMode()) {
-        RETURN_NOT_OK(
-            reader->set_offsets_mode(query_reader.getVarOffsetsMode()));
-      }
-
-      RETURN_NOT_OK(reader->set_offsets_extra_element(
-          query_reader.getVarOffsetsAddExtraElement()));
-
-      if (query_reader.getVarOffsetsBitsize() > 0) {
-        RETURN_NOT_OK(
-            reader->set_offsets_bitsize(query_reader.getVarOffsetsBitsize()));
-      }
-
       RETURN_NOT_OK(dense_reader_from_capnp(
-          schema, reader_reader, query, reader, compute_tp));
+          schema,
+          reader_reader,
+          query,
+          dynamic_cast<DenseReader*>(query->strategy()),
+          compute_tp));
     } else {
       auto reader_reader = query_reader.getReader();
-      auto reader = (Reader*)query->strategy();
-
-      if (query_reader.hasVarOffsetsMode()) {
-        RETURN_NOT_OK(
-            reader->set_offsets_mode(query_reader.getVarOffsetsMode()));
-      }
-
-      RETURN_NOT_OK(reader->set_offsets_extra_element(
-          query_reader.getVarOffsetsAddExtraElement()));
-
-      if (query_reader.getVarOffsetsBitsize() > 0) {
-        RETURN_NOT_OK(
-            reader->set_offsets_bitsize(query_reader.getVarOffsetsBitsize()));
-      }
-
-      RETURN_NOT_OK(
-          reader_from_capnp(reader_reader, query, reader, compute_tp));
+      RETURN_NOT_OK(reader_from_capnp(
+          reader_reader,
+          query,
+          dynamic_cast<Reader*>(query->strategy()),
+          compute_tp));
     }
-  } else {
+  } else if (query_type == QueryType::WRITE) {
     auto writer_reader = query_reader.getWriter();
-    auto writer = (Writer*)query->strategy();
+    auto writer = dynamic_cast<WriterBase*>(query->strategy());
 
     if (query_reader.hasVarOffsetsMode()) {
       RETURN_NOT_OK(writer->set_offsets_mode(query_reader.getVarOffsetsMode()));
@@ -1751,11 +1942,11 @@ Status query_from_capnp(
           writer->set_offsets_bitsize(query_reader.getVarOffsetsBitsize()));
     }
 
-    RETURN_NOT_OK(writer_from_capnp(writer_reader, writer));
+    RETURN_NOT_OK(writer_from_capnp(*query, writer_reader, writer, context));
 
     // For sparse writes we want to explicitly set subarray to nullptr.
     const bool sparse_write =
-        !schema->dense() || query->layout() == Layout::UNORDERED;
+        !schema.dense() || query->layout() == Layout::UNORDERED;
     if (!sparse_write) {
       if (writer_reader.hasSubarray()) {
         auto subarray_reader = writer_reader.getSubarray();
@@ -1768,12 +1959,16 @@ Status query_from_capnp(
 
       // Subarray
       if (writer_reader.hasSubarrayRanges()) {
-        Subarray subarray(array, layout, writer->stats(), false);
+        Subarray subarray(array, layout, query->stats(), dummy_logger, false);
         auto subarray_reader = writer_reader.getSubarrayRanges();
         RETURN_NOT_OK(subarray_from_capnp(subarray_reader, &subarray));
         RETURN_NOT_OK(query->set_subarray_unsafe(subarray));
       }
     }
+  } else {
+    auto delete_reader = query_reader.getDelete();
+    auto delete_strategy = dynamic_cast<DeletesAndUpdates*>(query->strategy());
+    RETURN_NOT_OK(delete_from_capnp(delete_reader, query, delete_strategy));
   }
 
   // Deserialize status. This must come last because various setters above
@@ -1792,6 +1987,21 @@ Status query_from_capnp(
     }
   }
 
+  if (query_reader.hasWrittenFragmentInfo()) {
+    auto reader_list = query_reader.getWrittenFragmentInfo();
+    auto& written_fi = query->get_written_fragment_info();
+    for (auto fi : reader_list) {
+      auto write_version = query->array_schema().write_version();
+      auto frag_dir_uri = ArrayDirectory::generate_fragment_dir_uri(
+          write_version,
+          query->array_schema().array_uri().add_trailing_slash());
+      auto fragment_name = std::string(fi.getUri().cStr());
+      written_fi.emplace_back(
+          frag_dir_uri.join_path(fragment_name),
+          std::make_pair(fi.getTimestampRange()[0], fi.getTimestampRange()[1]));
+    }
+  }
+
   return Status::Ok();
 }
 
@@ -1801,22 +2011,18 @@ Status query_serialize(
     bool clientside,
     BufferList* serialized_buffer) {
   if (serialize_type == SerializationType::JSON)
-    return LOG_STATUS(Status::SerializationError(
+    return LOG_STATUS(Status_SerializationError(
         "Cannot serialize query; json format not supported."));
-
-  const auto* array_schema = query->array_schema();
-  if (array_schema == nullptr || query->array() == nullptr)
-    return LOG_STATUS(Status::SerializationError(
-        "Cannot serialize; array or array schema is null."));
 
   try {
     ::capnp::MallocMessageBuilder message;
     capnp::Query::Builder query_builder = message.initRoot<capnp::Query>();
-    RETURN_NOT_OK(query_to_capnp(*query, &query_builder));
+    RETURN_NOT_OK(query_to_capnp(*query, &query_builder, clientside));
 
     // Determine whether we should be serializing the buffer data.
     const bool serialize_buffers =
         (clientside && query->type() == QueryType::WRITE) ||
+        (clientside && query->type() == QueryType::MODIFY_EXCLUSIVE) ||
         (!clientside && query->type() == QueryType::READ);
 
     switch (serialize_type) {
@@ -1881,15 +2087,15 @@ Status query_serialize(
         break;
       }
       default:
-        return LOG_STATUS(Status::SerializationError(
+        return LOG_STATUS(Status_SerializationError(
             "Cannot serialize; unknown serialization type"));
     }
   } catch (kj::Exception& e) {
-    return LOG_STATUS(Status::SerializationError(
+    return LOG_STATUS(Status_SerializationError(
         "Cannot serialize; kj::Exception: " +
         std::string(e.getDescription().cStr())));
   } catch (std::exception& e) {
-    return LOG_STATUS(Status::SerializationError(
+    return LOG_STATUS(Status_SerializationError(
         "Cannot serialize; exception: " + std::string(e.what())));
   }
 
@@ -1904,7 +2110,7 @@ Status do_query_deserialize(
     Query* query,
     ThreadPool* compute_tp) {
   if (serialize_type == SerializationType::JSON)
-    return LOG_STATUS(Status::SerializationError(
+    return LOG_STATUS(Status_SerializationError(
         "Cannot deserialize query; json format not supported."));
 
   try {
@@ -1925,7 +2131,7 @@ Status do_query_deserialize(
       case SerializationType::CAPNP: {
         // Capnp FlatArrayMessageReader requires 64-bit alignment.
         if (!utils::is_aligned<sizeof(uint64_t)>(serialized_buffer.cur_data()))
-          return LOG_STATUS(Status::SerializationError(
+          return LOG_STATUS(Status_SerializationError(
               "Could not deserialize query; buffer is not 8-byte aligned."));
 
         // Set traversal limit to 10GI (TODO: make this a config option)
@@ -1949,15 +2155,15 @@ Status do_query_deserialize(
             query_reader, context, buffer_start, copy_state, query, compute_tp);
       }
       default:
-        return LOG_STATUS(Status::SerializationError(
+        return LOG_STATUS(Status_SerializationError(
             "Cannot deserialize; unknown serialization type."));
     }
   } catch (kj::Exception& e) {
-    return LOG_STATUS(Status::SerializationError(
+    return LOG_STATUS(Status_SerializationError(
         "Cannot deserialize; kj::Exception: " +
         std::string(e.getDescription().cStr())));
   } catch (std::exception& e) {
-    return LOG_STATUS(Status::SerializationError(
+    return LOG_STATUS(Status_SerializationError(
         "Cannot deserialize; exception: " + std::string(e.what())));
   }
   return Status::Ok();
@@ -2015,7 +2221,8 @@ Status query_deserialize(
         query,
         compute_tp);
     if (!st2.ok()) {
-      LOG_FATAL(st2.message());
+      LOG_ERROR(st2.message());
+      return st2;
     }
   }
 
@@ -2133,15 +2340,15 @@ Status query_est_result_size_serialize(
         break;
       }
       default:
-        return LOG_STATUS(Status::SerializationError(
+        return LOG_STATUS(Status_SerializationError(
             "Cannot serialize; unknown serialization type"));
     }
   } catch (kj::Exception& e) {
-    return LOG_STATUS(Status::SerializationError(
+    return LOG_STATUS(Status_SerializationError(
         "Cannot serialize; kj::Exception: " +
         std::string(e.getDescription().cStr())));
   } catch (std::exception& e) {
-    return LOG_STATUS(Status::SerializationError(
+    return LOG_STATUS(Status_SerializationError(
         "Cannot serialize; exception: " + std::string(e.what())));
   }
 
@@ -2184,19 +2391,210 @@ Status query_est_result_size_deserialize(
       }
       default: {
         return LOG_STATUS(
-            Status::SerializationError("Error deserializing query est result "
-                                       "size; Unknown serialization type "
-                                       "passed"));
+            Status_SerializationError("Error deserializing query est result "
+                                      "size; Unknown serialization type "
+                                      "passed"));
       }
     }
   } catch (kj::Exception& e) {
-    return LOG_STATUS(Status::SerializationError(
+    return LOG_STATUS(Status_SerializationError(
         "Error deserializing query est result size; kj::Exception: " +
         std::string(e.getDescription().cStr())));
   } catch (std::exception& e) {
-    return LOG_STATUS(Status::SerializationError(
+    return LOG_STATUS(Status_SerializationError(
         "Error deserializing query est result size; exception " +
         std::string(e.what())));
+  }
+
+  return Status::Ok();
+}
+
+Status global_write_state_to_capnp(
+    const Query& query,
+    GlobalOrderWriter& globalwriter,
+    capnp::GlobalWriteState::Builder* state_builder,
+    bool client_side) {
+  auto& write_state = *globalwriter.get_global_state();
+
+  auto& cells_written = write_state.cells_written_;
+  if (!cells_written.empty()) {
+    auto cells_written_builder = state_builder->initCellsWritten();
+    auto entries_builder =
+        cells_written_builder.initEntries(cells_written.size());
+    uint64_t index = 0;
+    for (auto& entry : cells_written) {
+      entries_builder[index].setKey(entry.first);
+      entries_builder[index].setValue(entry.second);
+      ++index;
+    }
+  }
+
+  if (write_state.frag_meta_) {
+    auto frag_meta = write_state.frag_meta_;
+    auto frag_meta_builder = state_builder->initFragMeta();
+    RETURN_NOT_OK(fragment_metadata_to_capnp(*frag_meta, &frag_meta_builder));
+  }
+
+  if (write_state.last_cell_coords_.has_value()) {
+    auto& single_coord = write_state.last_cell_coords_.value();
+    auto coord_builder = state_builder->initLastCellCoords();
+
+    auto& coords = single_coord.get_coords();
+    if (!coords.empty()) {
+      auto builder = coord_builder.initCoords(coords.size());
+      for (uint64_t i = 0; i < coords.size(); ++i) {
+        builder.init(i, coords[i].size());
+        for (uint64_t j = 0; j < coords.size(); ++j) {
+          builder[i].set(j, coords[i][j]);
+        }
+      }
+    }
+    auto& sizes = single_coord.get_sizes();
+    if (!sizes.empty()) {
+      auto builder = coord_builder.initSizes(sizes.size());
+      for (uint64_t i = 0; i < sizes.size(); ++i) {
+        builder.set(i, sizes[i]);
+      }
+    }
+    auto& single_offset = single_coord.get_single_offset();
+    if (!single_offset.empty()) {
+      auto builder = coord_builder.initSingleOffset(single_offset.size());
+      for (uint64_t i = 0; i < single_offset.size(); ++i) {
+        builder.set(i, single_offset[i]);
+      }
+    }
+  }
+
+  state_builder->setLastHilbertValue(write_state.last_hilbert_value_);
+
+  // Serialize the multipart upload state
+  auto&& [st, multipart_states] =
+      globalwriter.multipart_upload_state(client_side);
+  RETURN_NOT_OK(st);
+
+  if (!multipart_states.empty()) {
+    auto multipart_builder = state_builder->initMultiPartUploadStates();
+    auto entries_builder =
+        multipart_builder.initEntries(multipart_states.size());
+    uint64_t index = 0;
+    for (auto& entry : multipart_states) {
+      entries_builder[index].setKey(entry.first);
+      auto multipart_entry_builder = entries_builder[index].initValue();
+      ++index;
+      auto& state = entry.second;
+      multipart_entry_builder.setPartNumber(state.part_number);
+      if (state.upload_id.has_value()) {
+        multipart_entry_builder.setUploadId(*state.upload_id);
+      }
+      if (!state.status.ok()) {
+        multipart_entry_builder.setStatus(state.status.message());
+      }
+
+      auto& completed_parts = state.completed_parts;
+      // Get completed parts
+      if (!completed_parts.empty()) {
+        auto builder = multipart_entry_builder.initCompletedParts(
+            state.completed_parts.size());
+        for (uint64_t i = 0; i < state.completed_parts.size(); ++i) {
+          if (state.completed_parts[i].e_tag.has_value()) {
+            builder[i].setETag(*state.completed_parts[i].e_tag);
+          }
+          builder[i].setPartNumber(state.completed_parts[i].part_number);
+        }
+      }
+    }
+  }
+
+  return Status::Ok();
+}
+
+Status global_write_state_from_capnp(
+    const Query& query,
+    const capnp::GlobalWriteState::Reader& state_reader,
+    GlobalOrderWriter* globalwriter,
+    const SerializationContext context) {
+  auto write_state = globalwriter->get_global_state();
+
+  if (state_reader.hasCellsWritten()) {
+    auto& cells_written = write_state->cells_written_;
+    auto cell_written_reader = state_reader.getCellsWritten();
+    for (const auto& entry : cell_written_reader.getEntries()) {
+      cells_written[std::string(entry.getKey().cStr())] = entry.getValue();
+    }
+  }
+
+  if (state_reader.hasLastCellCoords()) {
+    auto single_coord_reader = state_reader.getLastCellCoords();
+    if (single_coord_reader.hasCoords() &&
+        single_coord_reader.hasSingleOffset() &&
+        single_coord_reader.hasSizes()) {
+      std::vector<std::vector<uint8_t>> coords;
+      std::vector<uint64_t> sizes;
+      std::vector<uint64_t> single_offset;
+      for (const auto& t : single_coord_reader.getCoords()) {
+        auto& last = coords.emplace_back();
+        last.reserve(t.size());
+        for (const auto& v : t) {
+          last.emplace_back(v);
+        }
+      }
+
+      sizes.reserve(single_coord_reader.getSizes().size());
+      for (const auto& size : single_coord_reader.getSizes()) {
+        sizes.emplace_back(size);
+      }
+      single_offset.reserve(single_coord_reader.getSingleOffset().size());
+      for (const auto& so : single_coord_reader.getSingleOffset()) {
+        single_offset.emplace_back(so);
+      }
+
+      write_state->last_cell_coords_.emplace(
+          query.array_schema(), coords, sizes, single_offset);
+    }
+  }
+
+  write_state->last_hilbert_value_ = state_reader.getLastHilbertValue();
+
+  if (state_reader.hasFragMeta()) {
+    auto frag_meta = write_state->frag_meta_;
+    auto frag_meta_reader = state_reader.getFragMeta();
+    RETURN_NOT_OK(fragment_metadata_from_capnp(
+        query.array_schema_shared(), frag_meta_reader, frag_meta));
+  }
+
+  // Deserialize the multipart upload state
+  if (state_reader.hasMultiPartUploadStates()) {
+    auto multipart_reader = state_reader.getMultiPartUploadStates();
+    if (multipart_reader.hasEntries()) {
+      for (auto entry : multipart_reader.getEntries()) {
+        VFS::MultiPartUploadState deserialized_state;
+        auto state = entry.getValue();
+        std::string buffer_uri(entry.getKey().cStr());
+        if (state.hasUploadId()) {
+          deserialized_state.upload_id = state.getUploadId();
+        }
+        if (state.hasStatus()) {
+          deserialized_state.status =
+              Status(std::string(state.getStatus().cStr()), "");
+        }
+        deserialized_state.part_number = entry.getValue().getPartNumber();
+        if (state.hasCompletedParts()) {
+          auto& parts = deserialized_state.completed_parts;
+          for (auto part : state.getCompletedParts()) {
+            parts.emplace_back();
+            parts.back().part_number = part.getPartNumber();
+            if (part.hasETag()) {
+              parts.back().e_tag = std::string(part.getETag().cStr());
+            }
+          }
+        }
+
+        RETURN_NOT_OK(globalwriter->set_multipart_upload_state(
+            buffer_uri,
+            deserialized_state,
+            context == SerializationContext::CLIENT));
+      }
+    }
   }
 
   return Status::Ok();
@@ -2205,25 +2603,25 @@ Status query_est_result_size_deserialize(
 #else
 
 Status query_serialize(Query*, SerializationType, bool, BufferList*) {
-  return LOG_STATUS(Status::SerializationError(
+  return LOG_STATUS(Status_SerializationError(
       "Cannot serialize; serialization not enabled."));
 }
 
 Status query_deserialize(
     const Buffer&, SerializationType, bool, CopyState*, Query*, ThreadPool*) {
-  return LOG_STATUS(Status::SerializationError(
+  return LOG_STATUS(Status_SerializationError(
       "Cannot deserialize; serialization not enabled."));
 }
 
 Status query_est_result_size_serialize(
     Query*, SerializationType, bool, Buffer*) {
-  return LOG_STATUS(Status::SerializationError(
+  return LOG_STATUS(Status_SerializationError(
       "Cannot serialize; serialization not enabled."));
 }
 
 Status query_est_result_size_deserialize(
     Query*, SerializationType, bool, const Buffer&) {
-  return LOG_STATUS(Status::SerializationError(
+  return LOG_STATUS(Status_SerializationError(
       "Cannot deserialize; serialization not enabled."));
 }
 

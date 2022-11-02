@@ -31,9 +31,9 @@
  * Tests of C API for sparse array operations.
  */
 
-#include "catch.hpp"
-#include "test/src/helpers.h"
-#include "test/src/vfs_helpers.h"
+#include <test/support/tdb_catch.h>
+#include "test/support/src/helpers.h"
+#include "test/support/src/vfs_helpers.h"
 #ifdef _WIN32
 #include "tiledb/sm/filesystem/win.h"
 #else
@@ -43,7 +43,7 @@
 #include "tiledb/sm/enums/encryption_type.h"
 #include "tiledb/sm/misc/utils.h"
 
-#include "test/src/helpers.h"
+#include "test/support/src/helpers.h"
 
 #include <cassert>
 #include <cstring>
@@ -694,7 +694,8 @@ void SparseArrayFx::test_random_subarrays(
     int64_t domain_size_0,
     int64_t domain_size_1,
     int iter_num) {
-  // write array_schema cells with value = row id * columns + col id to disk
+  // write array_schema_latest cells with value = row id * columns + col id to
+  // disk
   write_sparse_array_unsorted_2D(array_name, domain_size_0, domain_size_1);
 
   // test random subarrays and check with corresponding value set by
@@ -715,7 +716,7 @@ void SparseArrayFx::test_random_subarrays(
     // Read subarray
     int* buffer = read_sparse_array_2D(
         array_name, d0_lo, d0_hi, d1_lo, d1_hi, TILEDB_READ, TILEDB_ROW_MAJOR);
-    CHECK(buffer != NULL);
+    CHECK(buffer != nullptr);
 
     // check
     bool allok = true;
@@ -3277,29 +3278,11 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(status == TILEDB_COMPLETED);
 
-  CHECK(a1[0] == 1);
-  CHECK(a1[1] == 2);
-  CHECK(a1[2] == 5);
-  CHECK(a1[3] == 6);
-  CHECK(a1[4] == 7);
-  CHECK(a1[5] == 1);
-  CHECK(a1[6] == 2);
+  check_counts(span(a1, 7), {0, 2, 2, 0, 0, 1, 1, 1});
   CHECK(a1_size == 7 * sizeof(int));
+  check_counts(span(coords_dim1, 7), {0, 4, 0, 2, 1});
+  check_counts(span(coords_dim2, 7), {0, 0, 3, 1, 3});
   CHECK(coords_size == 7 * sizeof(uint64_t));
-  CHECK(coords_dim1[0] == 1);
-  CHECK(coords_dim2[0] == 2);
-  CHECK(coords_dim1[1] == 1);
-  CHECK(coords_dim2[1] == 4);
-  CHECK(coords_dim1[2] == 4);
-  CHECK(coords_dim2[2] == 2);
-  CHECK(coords_dim1[3] == 3);
-  CHECK(coords_dim2[3] == 3);
-  CHECK(coords_dim1[4] == 3);
-  CHECK(coords_dim2[4] == 4);
-  CHECK(coords_dim1[5] == 1);
-  CHECK(coords_dim2[5] == 2);
-  CHECK(coords_dim1[6] == 1);
-  CHECK(coords_dim2[6] == 4);
 
   // Close array
   CHECK(tiledb_array_close(ctx, array) == TILEDB_OK);
@@ -3375,14 +3358,22 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(status == TILEDB_INCOMPLETE);
 
-  CHECK(a1_size == 2 * sizeof(int));
-  CHECK(a1[0] == 1);
-  CHECK(a1[1] == 2);
-  CHECK(coords_size == 2 * sizeof(uint64_t));
-  CHECK(coords_dim1[0] == 1);
-  CHECK(coords_dim2[0] == 2);
-  CHECK(coords_dim1[1] == 1);
-  CHECK(coords_dim2[1] == 4);
+  if (use_refactored_sparse_global_order_reader()) {
+    CHECK(a1_size == 3 * sizeof(int));
+    check_counts(span(a1, 3), {0, 1, 1, 0, 0, 1});
+    CHECK(coords_size == 3 * sizeof(uint64_t));
+    check_counts(span(coords_dim1, 3), {0, 2, 0, 0, 1});
+    check_counts(span(coords_dim2, 3), {0, 0, 2, 0, 1});
+  } else {
+    CHECK(a1_size == 2 * sizeof(int));
+    CHECK(a1[0] == 1);
+    CHECK(a1[1] == 2);
+    CHECK(coords_size == 2 * sizeof(uint64_t));
+    CHECK(coords_dim1[0] == 1);
+    CHECK(coords_dim2[0] == 2);
+    CHECK(coords_dim1[1] == 1);
+    CHECK(coords_dim2[1] == 4);
+  }
 
   rc = tiledb_query_submit(ctx, query);
   CHECK(rc == TILEDB_OK);
@@ -3390,17 +3381,25 @@ TEST_CASE_METHOD(
   REQUIRE(rc == TILEDB_OK);
   REQUIRE(status == TILEDB_COMPLETED);
 
-  CHECK(a1_size == 3 * sizeof(int));
-  CHECK(a1[0] == 5);
-  CHECK(a1[1] == 6);
-  CHECK(a1[2] == 7);
-  CHECK(coords_size == 3 * sizeof(uint64_t));
-  CHECK(coords_dim1[0] == 4);
-  CHECK(coords_dim2[0] == 2);
-  CHECK(coords_dim1[1] == 3);
-  CHECK(coords_dim2[1] == 3);
-  CHECK(coords_dim1[2] == 3);
-  CHECK(coords_dim2[2] == 4);
+  if (use_refactored_sparse_global_order_reader()) {
+    CHECK(a1_size == 2 * sizeof(int));
+    check_counts(span(a1, 2), {0, 0, 0, 0, 0, 0, 1, 1});
+    CHECK(coords_size == 2 * sizeof(uint64_t));
+    check_counts(span(coords_dim1, 2), {0, 0, 0, 2});
+    check_counts(span(coords_dim2, 2), {0, 0, 0, 1, 1});
+  } else {
+    CHECK(a1_size == 3 * sizeof(int));
+    CHECK(a1[0] == 5);
+    CHECK(a1[1] == 6);
+    CHECK(a1[2] == 7);
+    CHECK(coords_size == 3 * sizeof(uint64_t));
+    CHECK(coords_dim1[0] == 4);
+    CHECK(coords_dim2[0] == 2);
+    CHECK(coords_dim1[1] == 3);
+    CHECK(coords_dim2[1] == 3);
+    CHECK(coords_dim1[2] == 3);
+    CHECK(coords_dim2[2] == 4);
+  }
 
   // Close array
   CHECK(tiledb_array_close(ctx, array) == TILEDB_OK);
@@ -3477,22 +3476,10 @@ TEST_CASE_METHOD(
   REQUIRE(status == TILEDB_COMPLETED);
 
   CHECK(a1_size == 5 * sizeof(int));
-  CHECK(a1[0] == 1);
-  CHECK(a1[1] == 2);
-  CHECK(a1[2] == 5);
-  CHECK(a1[3] == 6);
-  CHECK(a1[4] == 7);
+  check_counts(span(a1, 5), {0, 1, 1, 0, 0, 1, 1, 1});
   CHECK(coords_size == 5 * sizeof(uint64_t));
-  CHECK(coords_dim1[0] == 1);
-  CHECK(coords_dim2[0] == 2);
-  CHECK(coords_dim1[1] == 1);
-  CHECK(coords_dim2[1] == 4);
-  CHECK(coords_dim1[2] == 4);
-  CHECK(coords_dim2[2] == 2);
-  CHECK(coords_dim1[3] == 3);
-  CHECK(coords_dim2[3] == 3);
-  CHECK(coords_dim1[4] == 3);
-  CHECK(coords_dim2[4] == 4);
+  check_counts(span(coords_dim1, 5), {0, 2, 0, 2, 1});
+  check_counts(span(coords_dim2, 5), {0, 0, 2, 1, 2});
 
   // Close array
   CHECK(tiledb_array_close(ctx, array) == TILEDB_OK);
@@ -5848,6 +5835,16 @@ TEST_CASE_METHOD(
     SparseArrayFx,
     "C API: Test sparse array, global order with 0-sized buffers",
     "[capi][sparse][global-check][zero-buffers]") {
+  bool serialized_writes = false;
+  SECTION("no serialization") {
+    serialized_writes = false;
+  }
+#ifdef TILEDB_SERIALIZATION
+  SECTION("serialization enabled global order write") {
+    serialized_writes = true;
+  }
+#endif
+
   SupportedFsLocal local_fs;
   std::string array_name = local_fs.file_prefix() + local_fs.temp_dir() +
                            "sparse_write_global_check";
@@ -5894,8 +5891,12 @@ TEST_CASE_METHOD(
   rc = tiledb_query_set_data_buffer(ctx, query, "d2", coords_dim2, &zero_size);
   CHECK(rc == TILEDB_OK);
 
-  // Submit query
-  CHECK(tiledb_query_submit(ctx, query) == TILEDB_OK);
+  if (!serialized_writes) {
+    rc = tiledb_query_submit(ctx, query);
+    CHECK(rc == TILEDB_OK);
+  } else {
+    submit_serialized_query(ctx, query);
+  }
 
   // Close array
   CHECK(tiledb_array_close(ctx, array) == TILEDB_OK);
@@ -6105,6 +6106,16 @@ TEST_CASE_METHOD(
     SparseArrayFx,
     "C API: Test sparse array, split coordinate buffers, global write",
     "[capi][sparse][split-coords][global]") {
+  bool serialized_writes = false;
+  SECTION("no serialization") {
+    serialized_writes = false;
+  }
+#ifdef TILEDB_SERIALIZATION
+  SECTION("serialization enabled global order write") {
+    serialized_writes = true;
+  }
+#endif
+
   SupportedFsLocal local_fs;
   std::string array_name = local_fs.file_prefix() + local_fs.temp_dir() +
                            "sparse_split_coords_global";
@@ -6174,13 +6185,14 @@ TEST_CASE_METHOD(
       ctx_, query, "d2", buffer_d2, &buffer_d2_size);
   CHECK(rc == TILEDB_OK);
 
-  // Submit query
-  rc = tiledb_query_submit(ctx_, query);
-  CHECK(rc == TILEDB_OK);
-
-  // Finalize query
-  rc = tiledb_query_finalize(ctx_, query);
-  CHECK(rc == TILEDB_OK);
+  if (!serialized_writes) {
+    rc = tiledb_query_submit(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+    rc = tiledb_query_finalize(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+  } else {
+    submit_and_finalize_serialized_query(ctx_, query);
+  }
 
   // Close array
   rc = tiledb_array_close(ctx_, array);
@@ -6868,6 +6880,16 @@ TEST_CASE_METHOD(
     SparseArrayFx,
     "Sparse array: 2D, multi write global order",
     "[capi][sparse][2D][multi-write]") {
+  bool serialized_writes = false;
+  SECTION("no serialization") {
+    serialized_writes = false;
+  }
+#ifdef TILEDB_SERIALIZATION
+  SECTION("serialization enabled global order write") {
+    serialized_writes = true;
+  }
+#endif
+
   // Create and write array
   SupportedFsLocal local_fs;
   std::string array_name = local_fs.file_prefix() + local_fs.temp_dir() +
@@ -6938,9 +6960,12 @@ TEST_CASE_METHOD(
     }
   }
 
-  // Submit query
-  rc = tiledb_query_submit(ctx_, query);
-  CHECK(rc == TILEDB_OK);
+  if (!serialized_writes) {
+    rc = tiledb_query_submit(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+  } else {
+    submit_serialized_query(ctx_, query);
+  }
 
   // Create new buffers of smaller size to test being able to write multiple
   // buffer sizes
@@ -6995,12 +7020,14 @@ TEST_CASE_METHOD(
   }
 
   // Submit query
-  rc = tiledb_query_submit(ctx_, query);
-  CHECK(rc == TILEDB_OK);
-
-  // Finalize query
-  rc = tiledb_query_finalize(ctx_, query);
-  CHECK(rc == TILEDB_OK);
+  if (!serialized_writes) {
+    rc = tiledb_query_submit(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+    rc = tiledb_query_finalize(ctx_, query);
+    CHECK(rc == TILEDB_OK);
+  } else {
+    submit_and_finalize_serialized_query(ctx_, query);
+  }
 
   // Close array
   rc = tiledb_array_close(ctx_, array);
@@ -7009,4 +7036,56 @@ TEST_CASE_METHOD(
   // Clean up
   tiledb_array_free(&array);
   tiledb_query_free(&query);
+}
+
+TEST_CASE_METHOD(
+    TemporaryDirectoryFixture,
+    "Write sparse array without setting layout",
+    "[capi][query]") {
+  // Create the array.
+  uint64_t domain[2]{0, 3};
+  uint64_t x_tile_extent{4};
+  auto array_schema = create_array_schema(
+      ctx,
+      TILEDB_SPARSE,
+      {"x"},
+      {TILEDB_UINT64},
+      {&domain[0]},
+      {&x_tile_extent},
+      {"a"},
+      {TILEDB_FLOAT64},
+      {1},
+      {tiledb::test::Compressor(TILEDB_FILTER_NONE, -1)},
+      TILEDB_ROW_MAJOR,
+      TILEDB_ROW_MAJOR,
+      4096,
+      false);
+  auto array_name = create_temporary_array("sparse_array1", array_schema);
+  tiledb_array_schema_free(&array_schema);
+
+  // Open array for writing.
+  tiledb_array_t* array;
+  require_tiledb_ok(tiledb_array_alloc(ctx, array_name.c_str(), &array));
+  require_tiledb_ok(tiledb_array_open(ctx, array, TILEDB_WRITE));
+
+  // Define input data and write.
+  std::vector<uint64_t> input_dim_data{0, 1, 2, 3};
+  std::vector<double> input_attr_data{0.5, 1.0, 1.5, 2.0};
+  uint64_t dim_data_size{input_dim_data.size() * sizeof(uint64_t)};
+  uint64_t attr_data_size{input_attr_data.size() * sizeof(double)};
+
+  // Create write query.
+  tiledb_query_t* query;
+  require_tiledb_ok(tiledb_query_alloc(ctx, array, TILEDB_WRITE, &query));
+  require_tiledb_ok(tiledb_query_set_data_buffer(
+      ctx, query, "x", input_dim_data.data(), &dim_data_size));
+  require_tiledb_ok(tiledb_query_set_data_buffer(
+      ctx, query, "a", input_attr_data.data(), &attr_data_size));
+
+  // Submit write query.
+  require_tiledb_ok(tiledb_query_submit(ctx, query));
+
+  // Clean-up.
+  tiledb_query_free(&query);
+  tiledb_array_free(&array);
 }

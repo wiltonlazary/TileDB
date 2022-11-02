@@ -39,14 +39,14 @@
 
 #include "tiledb/common/status.h"
 #include "tiledb/sm/config/config.h"
+#include "tiledb/sm/storage_manager/storage_manager_declaration.h"
 
 using namespace tiledb::common;
 
 namespace tiledb {
 namespace sm {
 
-class OpenArrayMemoryTracker;
-class StorageManager;
+class URI;
 
 namespace global_state {
 
@@ -69,7 +69,7 @@ class GlobalState {
    * @param config The TileDB configuration parameters (or nullptr).
    * @return Status
    */
-  Status init(const Config* config);
+  Status init(const Config& config = Config());
 
   /**
    * Register the given StorageManger instance.
@@ -87,15 +87,6 @@ class GlobalState {
    * Returns a copy of the set of registered StorageManager instances.
    */
   std::set<StorageManager*> storage_managers();
-
-  /**
-   * Find the open array memory tracker amongst all the storage managers.
-   * @param array_uri The array URI.
-   * @param caller The storage manager that iniciated the call.
-   * @return the memory tracker object for the array.
-   */
-  OpenArrayMemoryTracker* array_memory_tracker(
-      const URI& array_uri, StorageManager* caller);
 
   /**
    * Getter for cert file

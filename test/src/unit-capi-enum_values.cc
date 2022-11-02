@@ -5,7 +5,7 @@
  *
  * The MIT License
  *
- * @copyright Copyright (c) 2017-2021 TileDB Inc.
+ * @copyright Copyright (c) 2017-2022 TileDB Inc.
  * @copyright Copyright (c) 2016 MIT and Intel Corporation
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -31,7 +31,7 @@
  * Tests the specific values of C API enums.
  */
 
-#include "catch.hpp"
+#include <test/support/tdb_catch.h>
 #include "tiledb/sm/c_api/tiledb.h"
 #include "tiledb/sm/enums/filter_type.h"
 
@@ -82,6 +82,8 @@ TEST_CASE("C API: Test enum values", "[capi][enums]") {
   REQUIRE(TILEDB_STRING_UCS2 == 15);
   REQUIRE(TILEDB_STRING_UCS4 == 16);
   REQUIRE(TILEDB_ANY == 17);
+  REQUIRE(TILEDB_BLOB == 40);
+  REQUIRE(TILEDB_BOOL == 41);
 
   /** Array type */
   REQUIRE(TILEDB_DENSE == 0);
@@ -106,6 +108,11 @@ TEST_CASE("C API: Test enum values", "[capi][enums]") {
   REQUIRE(TILEDB_FILTER_BYTESHUFFLE == 9);
   REQUIRE(TILEDB_FILTER_POSITIVE_DELTA == 10);
   REQUIRE((uint8_t)FilterType::INTERNAL_FILTER_AES_256_GCM == 11);
+  REQUIRE(TILEDB_FILTER_CHECKSUM_MD5 == 12);
+  REQUIRE(TILEDB_FILTER_CHECKSUM_SHA256 == 13);
+  REQUIRE(TILEDB_FILTER_DICTIONARY == 14);
+  REQUIRE(TILEDB_FILTER_SCALE_FLOAT == 15);
+  REQUIRE(TILEDB_FILTER_XOR == 16);
 
   /** Filter option */
   REQUIRE(TILEDB_COMPRESSION_LEVEL == 0);
@@ -214,6 +221,18 @@ TEST_CASE("C API: Test enum string conversion", "[capi][enums]") {
   REQUIRE(
       (tiledb_datatype_from_str("CHAR", &datatype) == TILEDB_OK &&
        datatype == TILEDB_CHAR));
+  REQUIRE(
+      (tiledb_datatype_to_str(TILEDB_BLOB, &c_str) == TILEDB_OK &&
+       std::string(c_str) == "BLOB"));
+  REQUIRE(
+      (tiledb_datatype_from_str("BLOB", &datatype) == TILEDB_OK &&
+       datatype == TILEDB_BLOB));
+  REQUIRE(
+      (tiledb_datatype_to_str(TILEDB_BOOL, &c_str) == TILEDB_OK &&
+       std::string(c_str) == "BOOL"));
+  REQUIRE(
+      (tiledb_datatype_from_str("BOOL", &datatype) == TILEDB_OK &&
+       datatype == TILEDB_BOOL));
   REQUIRE(
       (tiledb_datatype_to_str(TILEDB_INT8, &c_str) == TILEDB_OK &&
        std::string(c_str) == "INT8"));
@@ -407,6 +426,23 @@ TEST_CASE("C API: Test enum string conversion", "[capi][enums]") {
       (tiledb_filter_type_from_str("POSITIVE_DELTA", &filter_type) ==
            TILEDB_OK &&
        filter_type == TILEDB_FILTER_POSITIVE_DELTA));
+  REQUIRE(
+      (tiledb_filter_type_from_str("CHECKSUM_MD5", &filter_type) == TILEDB_OK &&
+       filter_type == TILEDB_FILTER_CHECKSUM_MD5));
+  REQUIRE(
+      (tiledb_filter_type_from_str("CHECKSUM_SHA256", &filter_type) ==
+           TILEDB_OK &&
+       filter_type == TILEDB_FILTER_CHECKSUM_SHA256));
+  REQUIRE(
+      (tiledb_filter_type_from_str("DICTIONARY_ENCODING", &filter_type) ==
+           TILEDB_OK &&
+       filter_type == TILEDB_FILTER_DICTIONARY));
+  REQUIRE(
+      (tiledb_filter_type_from_str("SCALE_FLOAT", &filter_type) == TILEDB_OK &&
+       filter_type == TILEDB_FILTER_SCALE_FLOAT));
+  REQUIRE(
+      (tiledb_filter_type_from_str("XOR", &filter_type) == TILEDB_OK &&
+       filter_type == TILEDB_FILTER_XOR));
 
   tiledb_filter_option_t filter_option;
   REQUIRE(
@@ -433,6 +469,18 @@ TEST_CASE("C API: Test enum string conversion", "[capi][enums]") {
       (tiledb_filter_option_from_str(
            "POSITIVE_DELTA_MAX_WINDOW", &filter_option) == TILEDB_OK &&
        filter_option == TILEDB_POSITIVE_DELTA_MAX_WINDOW));
+  REQUIRE(
+      (tiledb_filter_option_from_str("SCALE_FLOAT_BYTEWIDTH", &filter_option) ==
+           TILEDB_OK &&
+       filter_option == TILEDB_SCALE_FLOAT_BYTEWIDTH));
+  REQUIRE(
+      (tiledb_filter_option_from_str("SCALE_FLOAT_FACTOR", &filter_option) ==
+           TILEDB_OK &&
+       filter_option == TILEDB_SCALE_FLOAT_FACTOR));
+  REQUIRE(
+      (tiledb_filter_option_from_str("SCALE_FLOAT_OFFSET", &filter_option) ==
+           TILEDB_OK &&
+       filter_option == TILEDB_SCALE_FLOAT_OFFSET));
 
   tiledb_encryption_type_t encryption_type;
   REQUIRE(

@@ -30,10 +30,11 @@
  * Tests the C++ API functions for manipulating fragment information.
  */
 
-#include "test/src/helpers.h"
+#include "test/support/src/helpers.h"
+#include "test/support/src/serialization_wrappers.h"
 #include "tiledb/sm/cpp_api/tiledb"
 
-#include <catch.hpp>
+#include <test/support/tdb_catch.h>
 #include <iostream>
 
 using namespace tiledb;
@@ -93,9 +94,34 @@ TEST_CASE(
     // Load fragment info, array is encrypted
     fragment_info.load();
 
+    bool serialized_load = false;
+    SECTION("no serialization") {
+      serialized_load = false;
+    }
+#ifdef TILEDB_SERIALIZATION
+    SECTION("serialization enabled fragment info load") {
+      serialized_load = true;
+    }
+#endif
+
+    if (serialized_load) {
+      FragmentInfo deserialized_fragment_info(ctx, array_name);
+      tiledb_fragment_info_serialize(
+          ctx.ptr().get(),
+          array_name.c_str(),
+          fragment_info.ptr().get(),
+          deserialized_fragment_info.ptr().get(),
+          tiledb_serialization_type_t(0));
+      fragment_info = deserialized_fragment_info;
+    }
+
     // Get fragment URI
     std::string uri;
     CHECK_THROWS(uri = fragment_info.fragment_uri(1));
+
+    // Get fragment name
+    std::string name;
+    CHECK_THROWS(name = fragment_info.fragment_name(1));
 
     // Get non-empty domain, invalid index and name
     std::vector<uint64_t> non_empty_dom(2);
@@ -141,12 +167,33 @@ TEST_CASE(
       TILEDB_ROW_MAJOR,
       2);
 
+  bool serialized_load = false;
+  SECTION("no serialization") {
+    serialized_load = false;
+  }
+#ifdef TILEDB_SERIALIZATION
+  SECTION("serialization enabled fragment info load") {
+    serialized_load = true;
+  }
+#endif
+
   {
     // Create fragment info object
     FragmentInfo fragment_info(ctx, array_name);
 
     // Load fragment info
     fragment_info.load();
+
+    if (serialized_load) {
+      FragmentInfo deserialized_fragment_info(ctx, array_name);
+      tiledb_fragment_info_serialize(
+          ctx.ptr().get(),
+          array_name.c_str(),
+          fragment_info.ptr().get(),
+          deserialized_fragment_info.ptr().get(),
+          tiledb_serialization_type_t(0));
+      fragment_info = deserialized_fragment_info;
+    }
 
     // No fragments yet
     auto fragment_num = fragment_info.fragment_num();
@@ -169,9 +216,23 @@ TEST_CASE(
     // Load fragment info again
     fragment_info.load();
 
+    if (serialized_load) {
+      FragmentInfo deserialized_fragment_info(ctx, array_name);
+      tiledb_fragment_info_serialize(
+          ctx.ptr().get(),
+          array_name.c_str(),
+          fragment_info.ptr().get(),
+          deserialized_fragment_info.ptr().get(),
+          tiledb_serialization_type_t(0));
+      fragment_info = deserialized_fragment_info;
+    }
+
     // Get fragment num again
     auto fragment_num = fragment_info.fragment_num();
     CHECK(fragment_num == 1);
+
+    auto total_cell_num = fragment_info.total_cell_num();
+    CHECK(total_cell_num == 10);
   }
 
   // Write another dense fragment
@@ -200,11 +261,31 @@ TEST_CASE(
       ctx.ptr().get(), array_name, 3, subarray, TILEDB_ROW_MAJOR, buffers);
 
   {
+    tiledb::Config cfg;
+    if (serialized_load) {
+      // Set the config that forces preloading of MBRs in remote
+      // case instead of loading them lazily.
+      cfg["sm.fragment_info.preload_mbrs"] = "true";
+    }
+
+    Context ctx2(cfg);
     // Create fragment info object
-    FragmentInfo fragment_info(ctx, array_name);
+    FragmentInfo fragment_info(ctx2, array_name);
 
     // Load fragment info again
     fragment_info.load();
+
+    if (serialized_load) {
+      // serialize and deserialize back fragment info
+      FragmentInfo deserialized_fragment_info(ctx2, array_name);
+      tiledb_fragment_info_serialize(
+          ctx2.ptr().get(),
+          array_name.c_str(),
+          fragment_info.ptr().get(),
+          deserialized_fragment_info.ptr().get(),
+          tiledb_serialization_type_t(0));
+      fragment_info = deserialized_fragment_info;
+    }
 
     // Get fragment num again
     auto fragment_num = fragment_info.fragment_num();
@@ -214,9 +295,13 @@ TEST_CASE(
     auto uri = fragment_info.fragment_uri(1);
     CHECK(uri == written_frag_uri);
 
+    // Get fragment schema name
+    auto schema_name = fragment_info.array_schema_name(1);
+    CHECK(schema_name.size() == 62);
+
     // Get fragment size
     auto size = fragment_info.fragment_size(1);
-    CHECK(size == 1662);
+    CHECK(size == 3202);
 
     // Get dense / sparse
     auto dense = fragment_info.dense(0);
@@ -245,12 +330,15 @@ TEST_CASE(
     CHECK(non_empty_dom == std::vector<uint64_t>{1, 7});
 
     // Get number of cells
-    auto cell_num = fragment_info.cell_num(0);
-    CHECK(cell_num == 10);
-    cell_num = fragment_info.cell_num(1);
-    CHECK(cell_num == 10);
-    cell_num = fragment_info.cell_num(2);
-    CHECK(cell_num == 10);
+    auto frag0_cell_num = fragment_info.cell_num(0);
+    CHECK(frag0_cell_num == 10);
+    auto frag1_cell_num = fragment_info.cell_num(1);
+    CHECK(frag1_cell_num == 10);
+    auto frag2_cell_num = fragment_info.cell_num(2);
+    CHECK(frag2_cell_num == 10);
+
+    auto total_cell_num = fragment_info.total_cell_num();
+    CHECK(total_cell_num == frag0_cell_num + frag1_cell_num + frag2_cell_num);
 
     // Get number of MBRs - should always be 0 since it's a dense array
     auto mbr_num = fragment_info.mbr_num(0);
@@ -363,10 +451,38 @@ TEST_CASE("C++ API: Test MBR fragment info", "[cppapi][fragment_info][mbr]") {
       &written_frag_uri);
 
   {
+    tiledb::Config cfg;
+    bool serialized_load = false;
+
+    SECTION("no serialization") {
+      serialized_load = false;
+    }
+#ifdef TILEDB_SERIALIZATION
+    SECTION("serialization enabled fragment info load") {
+      // Set the config that forces preloading of MBRs in remote
+      // case instead of loading them lazily.
+      cfg["sm.fragment_info.preload_mbrs"] = "true";
+      serialized_load = true;
+    }
+#endif
+
+    Context ctx2(cfg);
     // Create fragment info object
-    FragmentInfo fragment_info(ctx, array_name);
+    FragmentInfo fragment_info(ctx2, array_name);
     // Load fragment info
     fragment_info.load();
+
+    if (serialized_load) {
+      FragmentInfo deserialized_fragment_info(ctx2, array_name);
+      tiledb_fragment_info_serialize(
+          ctx2.ptr().get(),
+          array_name.c_str(),
+          fragment_info.ptr().get(),
+          deserialized_fragment_info.ptr().get(),
+          tiledb_serialization_type_t(0));
+      fragment_info = deserialized_fragment_info;
+    }
+
     auto fragment_num = fragment_info.fragment_num();
     CHECK(fragment_num == 3);
 
@@ -390,13 +506,14 @@ TEST_CASE("C++ API: Test MBR fragment info", "[cppapi][fragment_info][mbr]") {
     fragment_info.get_mbr(1, 1, "d1", &mbr[0]);
     CHECK(mbr == std::vector<uint64_t>{7, 8});
   }
+
   // Clean up
   remove_dir(array_name, ctx.ptr().get(), vfs.ptr().get());
 }
 
 TEST_CASE(
     "C++ API: Test fragment info, load from array with string dimension",
-    "[cppapi][fragment_info][load][string-dim][mbr]") {
+    "[cppapi][fragment_info][load][string-dims][mbr]") {
   // Create TileDB context
   Context ctx;
   Config cfg;
@@ -440,11 +557,38 @@ TEST_CASE(
       &written_frag_uri);
 
   {
+    tiledb::Config cfg;
+    bool serialized_load = false;
+
+    SECTION("no serialization") {
+      serialized_load = false;
+    }
+#ifdef TILEDB_SERIALIZATION
+    SECTION("serialization enabled fragment info load") {
+      // Set the config that forces preloading of MBRs in remote
+      // case instead of loading them lazily.
+      cfg["sm.fragment_info.preload_mbrs"] = "true";
+      serialized_load = true;
+    }
+#endif
+
+    Context ctx2(cfg);
     // Create fragment info object
-    FragmentInfo fragment_info(ctx, array_name);
+    FragmentInfo fragment_info(ctx2, array_name);
 
     // Load fragment info
     fragment_info.load();
+
+    if (serialized_load) {
+      FragmentInfo deserialized_fragment_info(ctx2, array_name);
+      tiledb_fragment_info_serialize(
+          ctx2.ptr().get(),
+          array_name.c_str(),
+          fragment_info.ptr().get(),
+          deserialized_fragment_info.ptr().get(),
+          tiledb_serialization_type_t(0));
+      fragment_info = deserialized_fragment_info;
+    }
 
     // Get non-empty domain
     auto non_empty_domain_str = fragment_info.non_empty_domain_var(0, 0);
@@ -522,12 +666,33 @@ TEST_CASE(
   write_array(
       ctx.ptr().get(), array_name, 2, subarray, TILEDB_ROW_MAJOR, buffers);
 
+  bool serialized_load = false;
+  SECTION("no serialization") {
+    serialized_load = false;
+  }
+#ifdef TILEDB_SERIALIZATION
+  SECTION("serialization enabled fragment info load") {
+    serialized_load = true;
+  }
+#endif
+
   {
     // Create fragment info object
     FragmentInfo fragment_info(ctx, array_name);
 
     // Load fragment info
     fragment_info.load();
+
+    if (serialized_load) {
+      FragmentInfo deserialized_fragment_info(ctx, array_name);
+      tiledb_fragment_info_serialize(
+          ctx.ptr().get(),
+          array_name.c_str(),
+          fragment_info.ptr().get(),
+          deserialized_fragment_info.ptr().get(),
+          tiledb_serialization_type_t(0));
+      fragment_info = deserialized_fragment_info;
+    }
 
     // Check for consolidated metadata
     auto has = fragment_info.has_consolidated_metadata(0);
@@ -552,6 +717,17 @@ TEST_CASE(
 
     // Load fragment info
     fragment_info.load();
+
+    if (serialized_load) {
+      FragmentInfo deserialized_fragment_info(ctx, array_name);
+      tiledb_fragment_info_serialize(
+          ctx.ptr().get(),
+          array_name.c_str(),
+          fragment_info.ptr().get(),
+          deserialized_fragment_info.ptr().get(),
+          tiledb_serialization_type_t(0));
+      fragment_info = deserialized_fragment_info;
+    }
 
     // Check for consolidated metadata
     auto has = fragment_info.has_consolidated_metadata(0);
@@ -579,6 +755,17 @@ TEST_CASE(
 
     // Load fragment info
     fragment_info.load();
+
+    if (serialized_load) {
+      FragmentInfo deserialized_fragment_info(ctx, array_name);
+      tiledb_fragment_info_serialize(
+          ctx.ptr().get(),
+          array_name.c_str(),
+          fragment_info.ptr().get(),
+          deserialized_fragment_info.ptr().get(),
+          tiledb_serialization_type_t(0));
+      fragment_info = deserialized_fragment_info;
+    }
 
     // Check for consolidated metadata
     auto has = fragment_info.has_consolidated_metadata(0);
@@ -648,12 +835,33 @@ TEST_CASE(
   write_array(
       ctx.ptr().get(), array_name, 2, subarray, TILEDB_ROW_MAJOR, buffers);
 
+  bool serialized_load = false;
+  SECTION("no serialization") {
+    serialized_load = false;
+  }
+#ifdef TILEDB_SERIALIZATION
+  SECTION("serialization enabled fragment info load") {
+    serialized_load = true;
+  }
+#endif
+
   {
     // Create fragment info object
     FragmentInfo fragment_info(ctx, array_name);
 
     // Load fragment info
     fragment_info.load();
+
+    if (serialized_load) {
+      FragmentInfo deserialized_fragment_info(ctx, array_name);
+      tiledb_fragment_info_serialize(
+          ctx.ptr().get(),
+          array_name.c_str(),
+          fragment_info.ptr().get(),
+          deserialized_fragment_info.ptr().get(),
+          tiledb_serialization_type_t(0));
+      fragment_info = deserialized_fragment_info;
+    }
 
     // Get number of fragments to vacuum
     auto to_vacuum_num = fragment_info.to_vacuum_num();
@@ -675,6 +883,17 @@ TEST_CASE(
 
     // Load fragment info
     fragment_info.load();
+
+    if (serialized_load) {
+      FragmentInfo deserialized_fragment_info(ctx, array_name);
+      tiledb_fragment_info_serialize(
+          ctx.ptr().get(),
+          array_name.c_str(),
+          fragment_info.ptr().get(),
+          deserialized_fragment_info.ptr().get(),
+          tiledb_serialization_type_t(0));
+      fragment_info = deserialized_fragment_info;
+    }
 
     // Get consolidated fragment URI
     auto uri = fragment_info.fragment_uri(0);
@@ -705,6 +924,17 @@ TEST_CASE(
     // Load fragment info
     fragment_info.load();
 
+    if (serialized_load) {
+      FragmentInfo deserialized_fragment_info(ctx, array_name);
+      tiledb_fragment_info_serialize(
+          ctx.ptr().get(),
+          array_name.c_str(),
+          fragment_info.ptr().get(),
+          deserialized_fragment_info.ptr().get(),
+          tiledb_serialization_type_t(0));
+      fragment_info = deserialized_fragment_info;
+    }
+
     // Get number of fragments to vacuum
     auto to_vacuum_num = fragment_info.to_vacuum_num();
     CHECK(to_vacuum_num == 2);
@@ -719,6 +949,17 @@ TEST_CASE(
 
     // Load fragment info
     fragment_info.load();
+
+    if (serialized_load) {
+      FragmentInfo deserialized_fragment_info(ctx, array_name);
+      tiledb_fragment_info_serialize(
+          ctx.ptr().get(),
+          array_name.c_str(),
+          fragment_info.ptr().get(),
+          deserialized_fragment_info.ptr().get(),
+          tiledb_serialization_type_t(0));
+      fragment_info = deserialized_fragment_info;
+    }
 
     // Get number of fragments to vacuum
     auto to_vacuum_num = fragment_info.to_vacuum_num();
@@ -809,6 +1050,27 @@ TEST_CASE(
     // Load fragment info
     fragment_info.load();
 
+    bool serialized_load = false;
+    SECTION("no serialization") {
+      serialized_load = false;
+    }
+#ifdef TILEDB_SERIALIZATION
+    SECTION("serialization enabled fragment info load") {
+      serialized_load = true;
+    }
+#endif
+
+    if (serialized_load) {
+      FragmentInfo deserialized_fragment_info(ctx, array_name);
+      tiledb_fragment_info_serialize(
+          ctx.ptr().get(),
+          array_name.c_str(),
+          fragment_info.ptr().get(),
+          deserialized_fragment_info.ptr().get(),
+          tiledb_serialization_type_t(0));
+      fragment_info = deserialized_fragment_info;
+    }
+
     // Get Array Schemas for fragments
     ArraySchema frag1_schema = fragment_info.array_schema(0);
     ArraySchema frag2_schema = fragment_info.array_schema(1);
@@ -830,22 +1092,24 @@ TEST_CASE(
     CHECK(frag1_schema_str == frag3_schema_str);
 
     // Check dump
+    const auto ver = std::to_string(tiledb::sm::constants::format_version);
     std::string dump_str =
         std::string("- Fragment num: 3\n") +
         "- Unconsolidated metadata num: 3\n" + "- To vacuum num: 0\n" +
         "- Fragment #1:\n" + "  > URI: " + written_frag_uri_1 + "\n" +
         "  > Type: dense\n" + "  > Non-empty domain: [1, 6]\n" +
-        "  > Size: 1662\n" + "  > Cell num: 10\n" +
-        "  > Timestamp range: [1, 1]\n" + "  > Format version: 10\n" +
+        "  > Size: 3202\n" + "  > Cell num: 10\n" +
+        "  > Timestamp range: [1, 1]\n" + "  > Format version: " + ver + "\n" +
         "  > Has consolidated metadata: no\n" + "- Fragment #2:\n" +
         "  > URI: " + written_frag_uri_2 + "\n" + "  > Type: dense\n" +
-        "  > Non-empty domain: [1, 4]\n" + "  > Size: 1619\n" +
+        "  > Non-empty domain: [1, 4]\n" + "  > Size: 3151\n" +
         "  > Cell num: 5\n" + "  > Timestamp range: [2, 2]\n" +
-        "  > Format version: 10\n" + "  > Has consolidated metadata: no\n" +
-        "- Fragment #3:\n" + "  > URI: " + written_frag_uri_3 + "\n" +
-        "  > Type: dense\n" + "  > Non-empty domain: [5, 6]\n" +
-        "  > Size: 1662\n" + "  > Cell num: 10\n" +
-        "  > Timestamp range: [3, 3]\n" + "  > Format version: 10\n" +
+        "  > Format version: " + ver + "\n" +
+        "  > Has consolidated metadata: no\n" + "- Fragment #3:\n" +
+        "  > URI: " + written_frag_uri_3 + "\n" + "  > Type: dense\n" +
+        "  > Non-empty domain: [5, 6]\n" + "  > Size: 3202\n" +
+        "  > Cell num: 10\n" + "  > Timestamp range: [3, 3]\n" +
+        "  > Format version: " + ver + "\n" +
         "  > Has consolidated metadata: no\n";
     FILE* gold_fout = fopen("gold_fout.txt", "w");
     const char* dump = dump_str.c_str();
